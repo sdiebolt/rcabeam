@@ -1,9 +1,9 @@
 """Generate and view a 3D RCA point-target volume.
 
-Run slices only:
-    uv run --with matplotlib python examples/volume_point_target.py
+Run compute-only smoke:
+    uv run python examples/volume_point_target.py
 
-Open in napari too:
+Open in napari:
     uv run python examples/volume_point_target.py --napari
 
 Open RCA plus dense matrix reference:
@@ -15,9 +15,6 @@ from __future__ import annotations
 import argparse
 import os
 
-os.environ.setdefault("MPLBACKEND", "Agg")
-
-import matplotlib.pyplot as plt
 import numpy as np
 
 from rcabeam import (
@@ -38,69 +35,6 @@ DISPLAY_FLOOR_DB = -40
 def _db(image: np.ndarray) -> np.ndarray:
     """Convert an image to normalized dB."""
     return 10 * np.log10(image / image.max() + 1e-12)
-
-
-def _plot_comparison(volumes: dict[str, np.ndarray], x: np.ndarray, z: np.ndarray, y: np.ndarray, path: str) -> None:
-    """Save x-z center slices for several volumes side by side."""
-    iy = len(y) // 2
-    fig, axes = plt.subplots(1, len(volumes), figsize=(4 * len(volumes), 4), squeeze=False)
-    for ax, (name, volume) in zip(axes[0], volumes.items(), strict=True):
-        ax.imshow(
-            _db(volume)[:, :, iy].T,
-            extent=[x[0] * 1e3, x[-1] * 1e3, z[-1] * 1e3, z[0] * 1e3],
-            aspect="auto",
-            cmap="gray",
-            vmin=DISPLAY_FLOOR_DB,
-            vmax=0,
-        )
-        ax.set_title(name)
-        ax.set_xlabel("x [mm]")
-    axes[0][0].set_ylabel("z [mm]")
-    fig.suptitle("RCA vs dense matrix reference")
-    fig.savefig(path, dpi=200)
-    plt.close(fig)
-    print(f"wrote {path}")
-
-
-def _plot_slices(volume_db: np.ndarray, x: np.ndarray, z: np.ndarray, y: np.ndarray, title: str, path: str) -> None:
-    """Save orthogonal center slices plus nearby z slices."""
-    ix, iz, iy = len(x) // 2, len(z) // 2, len(y) // 2
-    z_offsets = [-12, 0, 12]
-    z_slices = [min(max(iz + off, 0), len(z) - 1) for off in z_offsets]
-
-    fig, axes = plt.subplots(2, 3, figsize=(11, 7))
-    planes = [
-        (volume_db[:, :, iy].T, [x[0], x[-1], z[-1], z[0]], "x-z center"),
-        (volume_db[:, iz, :].T, [x[0], x[-1], y[0], y[-1]], "x-y center"),
-        (volume_db[ix, :, :].T, [z[0], z[-1], y[-1], y[0]], "z-y center"),
-    ]
-    for ax, (img, extent, label) in zip(axes[0], planes, strict=True):
-        im = ax.imshow(
-            img,
-            extent=np.asarray(extent) * 1e3,
-            aspect="auto",
-            cmap="gray",
-            vmin=DISPLAY_FLOOR_DB,
-            vmax=0,
-        )
-        ax.set_title(label)
-
-    for ax, zi in zip(axes[1], z_slices, strict=True):
-        ax.imshow(
-            volume_db[:, zi, :].T,
-            extent=[x[0] * 1e3, x[-1] * 1e3, y[0] * 1e3, y[-1] * 1e3],
-            aspect="auto",
-            cmap="gray",
-            vmin=DISPLAY_FLOOR_DB,
-            vmax=0,
-        )
-        ax.set_title(f"x-y at z={z[zi] * 1e3:.2f} mm")
-
-    fig.suptitle(title)
-    fig.colorbar(im, ax=axes, label="dB", shrink=0.8)
-    fig.savefig(path, dpi=200)
-    plt.close(fig)
-    print(f"wrote {path}")
 
 
 def main() -> None:
@@ -151,11 +85,7 @@ def main() -> None:
     dmas = dmas_ccf_acf_frame(rc_ch, cr_ch, angles, angles, t_start, t_start, grid, geom)
     dmas_volume = dmas["dmas_ccf_acf"]
 
-    _plot_slices(_db(opw_volume), x, z, y, "RCA OPW scatterers", "rca_opw_volume_slices.png")
-    _plot_slices(_db(xdoppler_volume), x, z, y, "RCA XDoppler scatterers", "rca_xdoppler_volume_slices.png")
-    _plot_slices(_db(fmas_volume), x, z, y, "RCA RC-FMAS scatterers", "rca_fmas_volume_slices.png")
-    _plot_slices(_db(stsw_volume), x, z, y, "RCA St-SW scatterers", "rca_stsw_volume_slices.png")
-    _plot_slices(_db(dmas_volume), x, z, y, "RCA DMAS-CCF-ACF scatterers", "rca_dmas_ccf_acf_volume_slices.png")
+    print("computed RCA volumes: OPW, XDoppler, RC-FMAS, St-SW, DMAS-CCF-ACF")
 
     matrix_volume = None
     if args.matrix:
@@ -176,18 +106,7 @@ def main() -> None:
             c=c,
         )
         matrix_volume = np.abs(matrix_iq.reshape((len(x), len(z), len(y)))) ** 2
-        _plot_comparison(
-            {
-                "Dense matrix": matrix_volume,
-                "RCA OPW": opw_volume,
-                "RCA XDoppler": xdoppler_volume,
-                "RCA RC-FMAS": fmas_volume,
-            },
-            x,
-            z,
-            y,
-            "rca_vs_matrix_slices.png",
-        )
+        print("computed dense matrix reference volume")
 
     if args.napari:
         os.environ.setdefault("QT_QPA_PLATFORM", "xcb")

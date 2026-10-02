@@ -8,19 +8,7 @@ This is a reference, not RCA: a dense 2D receive aperture with compounded plane 
 
 from __future__ import annotations
 
-import os
-
-os.environ.setdefault("MPLBACKEND", "Agg")
-
-import matplotlib.pyplot as plt
 import numpy as np
-
-DISPLAY_FLOOR_DB = -40
-
-
-def _db(image: np.ndarray) -> np.ndarray:
-    """Convert an image to normalized dB."""
-    return 20 * np.log10(np.abs(image) / np.abs(image).max() + 1e-12)
 
 
 def _matrix_positions(n_side: int, pitch: float) -> np.ndarray:
@@ -125,25 +113,6 @@ def _matrix_das_compound(
     return out
 
 
-def _plot_slices(volume_db: np.ndarray, x: np.ndarray, z: np.ndarray, y: np.ndarray, path: str) -> None:
-    """Save center slices for the matrix reference volume."""
-    ix, iz, iy = len(x) // 2, len(z) // 2, len(y) // 2
-    fig, axes = plt.subplots(1, 3, figsize=(11, 3.5))
-    planes = [
-        (volume_db[:, :, iy].T, [x[0], x[-1], z[-1], z[0]], "x-z center"),
-        (volume_db[:, iz, :].T, [x[0], x[-1], y[0], y[-1]], "x-y center"),
-        (volume_db[ix, :, :].T, [z[0], z[-1], y[-1], y[0]], "z-y center"),
-    ]
-    for ax, (img, extent, title) in zip(axes, planes, strict=True):
-        im = ax.imshow(img, extent=np.asarray(extent) * 1e3, aspect="auto", cmap="gray", vmin=DISPLAY_FLOOR_DB, vmax=0)
-        ax.set_title(title)
-    fig.colorbar(im, ax=axes, label="dB", shrink=0.8)
-    fig.suptitle("Dense matrix probe reference, mach DAS")
-    fig.savefig(path, dpi=200)
-    plt.close(fig)
-    print(f"wrote {path}")
-
-
 def main() -> None:
     """Generate a dense matrix-array reference image with mach."""
     f0 = 15e6
@@ -174,19 +143,22 @@ def main() -> None:
     print(f"angles: {n_angles_side} x {n_angles_side} = {n_angles_side**2} plane waves")
     print(f"grid: {len(x)} x {len(z)} x {len(y)} = {len(scan):,} voxels")
 
-    volume = _matrix_das_compound(
-        rx_coords,
-        scan,
-        scatterers,
-        n_angles_side=n_angles_side,
-        angle_limit=angle_limit,
-        nsamp=nsamp,
-        t_start=t_start,
-        fs=fs,
-        f0=f0,
-        c=c,
-    ).reshape((len(x), len(z), len(y)))
-    _plot_slices(_db(volume), x, z, y, "matrix_reference_slices.png")
+    volume = np.abs(
+        _matrix_das_compound(
+            rx_coords,
+            scan,
+            scatterers,
+            n_angles_side=n_angles_side,
+            angle_limit=angle_limit,
+            nsamp=nsamp,
+            t_start=t_start,
+            fs=fs,
+            f0=f0,
+            c=c,
+        ).reshape((len(x), len(z), len(y)))
+    ) ** 2
+    peak = np.unravel_index(np.argmax(volume), volume.shape)
+    print(f"peak index: {peak}, coords: {(x[peak[0]] * 1e3, z[peak[1]] * 1e3, y[peak[2]] * 1e3)} mm")
 
 
 if __name__ == "__main__":
