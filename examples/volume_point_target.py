@@ -22,11 +22,14 @@ from rcabeam import (
     delay_rca_channels,
     dmas_ccf_acf_frame,
     opw,
+    opw_pd_from_channels,
     power_doppler,
     rc_fmas_pd,
+    rc_fmas_pd_from_channels,
     simulate_point,
     st_sw_pd,
     xdoppler_pd,
+    xdoppler_pd_from_channels,
 )
 
 DISPLAY_FLOOR_DB = -40
@@ -41,20 +44,27 @@ def main() -> None:
     """Generate a 3D RCA volume and optionally open napari."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--napari", action="store_true", help="Open RCA volumes in napari.")
+    parser.add_argument("--grid", type=int, default=80, help="Voxels per x/z/y axis.")
+    parser.add_argument("--elements", type=int, default=80, help="RCA row/column elements per aperture.")
+    parser.add_argument("--angles", type=int, default=16, help="Plane waves per RC/CR aperture.")
+    parser.add_argument("--frequency", type=float, default=15e6, help="Center frequency in Hz.")
+    parser.add_argument("--pitch", type=float, default=0.1e-3, help="Element pitch in meters.")
+    parser.add_argument("--quality", action="store_true", help="Use 160³ lambda/2-ish grid preset.")
+    parser.add_argument("--fast", action="store_true", help="Use fused channel→PD paths and skip St-SW/DMAS.")
     parser.add_argument("--matrix", action="store_true", help="Add a dense matrix-array DAS reference layer in napari.")
     parser.add_argument("--matrix-side", type=int, default=80, help="Dense matrix elements per side for --matrix.")
     parser.add_argument("--matrix-angles", type=int, default=5, help="Dense matrix plane waves per steering axis for --matrix.")
     args = parser.parse_args()
 
-    f0 = 15e6
+    f0 = args.frequency
     c = 1540.0
-    pitch = 0.1e-3
-    n_elements = 80
-    n_grid = 80  # dev preset. Use 160 for ~lambda/2 sampling over 8 mm at 15 MHz.
+    pitch = args.pitch
+    n_elements = args.elements
+    n_grid = 160 if args.quality else args.grid
     el = (np.arange(n_elements) - (n_elements - 1) / 2) * pitch
     geom = RCAGeometry(x_el=el, y_el=el, c=c, fs=4 * f0, f_demod=f0, fnumber=1.0)
 
-    n_angles = 16
+    n_angles = args.angles
     angles = np.deg2rad(np.linspace(-8, 8, n_angles))
     scatterers = [
         ((0.0, 8.0e-3, 0.0), 1.0),
@@ -72,20 +82,26 @@ def main() -> None:
     rc_ch = sum(amp * simulate_point(geom, angles, point, nsamp, t_start, "RC") for point, amp in scatterers)
     cr_ch = sum(amp * simulate_point(geom, angles, point, nsamp, t_start, "CR") for point, amp in scatterers)
     grid = (x, z, y)
-    rc = delay_rca_channels(rc_ch, angles, t_start, grid, geom, "RC")
-    cr = delay_rca_channels(cr_ch, angles, t_start, grid, geom, "CR")
-    iq = np.concatenate([rc, cr], axis=-1)[..., None]
-
-    rc_idx = np.arange(len(angles))
-    cr_idx = np.arange(len(angles), 2 * len(angles))
-    opw_volume = power_doppler(opw(iq))
-    xdoppler_volume = xdoppler_pd(iq, rc_idx, cr_idx)
-    fmas_volume = rc_fmas_pd(iq, rc_idx, cr_idx)
-    stsw_volume = st_sw_pd(iq, rc_idx, cr_idx, k=2)
-    dmas = dmas_ccf_acf_frame(rc_ch, cr_ch, angles, angles, t_start, t_start, grid, geom)
-    dmas_volume = dmas["dmas_ccf_acf"]
-
-    print("computed RCA volumes: OPW, XDoppler, RC-FMAS, St-SW, DMAS-CCF-ACF")
+    if args.fast:
+        opw_volume = opw_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)
+        xdoppler_volume = xdoppler_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)
+        fmas_volume = rc_fmas_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)
+        stsw_volume = None
+        dmas_volume = None
+        print("computed fast RCA volumes: fused OPW, fused XDoppler, fused RC-FMAS")
+    else:
+        rc = delay_rca_channels(rc_ch, angles, t_start, grid, geom, "RC")
+        cr = delay_rca_channels(cr_ch, angles, t_start, grid, geom, "CR")
+        iq = np.concatenate([rc, cr], axis=-1)[..., None]
+        rc_idx = np.arange(len(angles))
+        cr_idx = np.arange(len(angles), 2 * len(angles))
+        opw_volume = power_doppler(opw(iq))
+        xdoppler_volume = xdoppler_pd(iq, rc_idx, cr_idx)
+        fmas_volume = rc_fmas_pd(iq, rc_idx, cr_idx)
+        stsw_volume = st_sw_pd(iq, rc_idx, cr_idx, k=2)
+        dmas = dmas_ccf_acf_frame(rc_ch, cr_ch, angles, angles, t_start, t_start, grid, geom)
+        dmas_volume = dmas["dmas_ccf_acf"]
+        print("computed RCA volumes: OPW, XDoppler, RC-FMAS, St-SW, DMAS-CCF-ACF")
 
     matrix_volume = None
     if args.matrix:
@@ -126,43 +142,25 @@ def main() -> None:
                 )
             )
 
-        layers.extend([
-            viewer.add_image(
-                _db(opw_volume).transpose(1, 2, 0),
-                name="OPW [dB]",
-                scale=scale,
-                contrast_limits=(DISPLAY_FLOOR_DB, 0),
-                rendering="mip",
-            ),
-            viewer.add_image(
-                _db(xdoppler_volume).transpose(1, 2, 0),
-                name="XDoppler [dB]",
-                scale=scale,
-                contrast_limits=(DISPLAY_FLOOR_DB, 0),
-                rendering="mip",
-            ),
-            viewer.add_image(
-                _db(fmas_volume).transpose(1, 2, 0),
-                name="RC-FMAS [dB]",
-                scale=scale,
-                contrast_limits=(DISPLAY_FLOOR_DB, 0),
-                rendering="mip",
-            ),
-            viewer.add_image(
-                _db(stsw_volume).transpose(1, 2, 0),
-                name="St-SW [dB]",
-                scale=scale,
-                contrast_limits=(DISPLAY_FLOOR_DB, 0),
-                rendering="mip",
-            ),
-            viewer.add_image(
-                _db(dmas_volume).transpose(1, 2, 0),
-                name="DMAS-CCF-ACF [dB]",
-                scale=scale,
-                contrast_limits=(DISPLAY_FLOOR_DB, 0),
-                rendering="mip",
-            ),
-        ])
+        method_volumes = [
+            ("OPW [dB]", opw_volume),
+            ("XDoppler [dB]", xdoppler_volume),
+            ("RC-FMAS [dB]", fmas_volume),
+        ]
+        if stsw_volume is not None:
+            method_volumes.append(("St-SW [dB]", stsw_volume))
+        if dmas_volume is not None:
+            method_volumes.append(("DMAS-CCF-ACF [dB]", dmas_volume))
+        for name, volume in method_volumes:
+            layers.append(
+                viewer.add_image(
+                    _db(volume).transpose(1, 2, 0),
+                    name=name,
+                    scale=scale,
+                    contrast_limits=(DISPLAY_FLOOR_DB, 0),
+                    rendering="mip",
+                )
+            )
         for layer in layers:
             layer.name_overlay.visible = True
             layer.name_overlay.gridded = True
