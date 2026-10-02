@@ -1,0 +1,233 @@
+"""Benchmark RCA beamforming methods on synthetic scatterers.
+
+Run:
+    uv run python examples/benchmark.py
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from time import perf_counter
+from typing import Any
+
+import numpy as np
+from rich.console import Console
+from rich.table import Table
+
+from rcabeam import (
+    RCAGeometry,
+    delay_rca_channel_data,
+    delay_rca_channels,
+    dmas_ccf_acf_frame,
+    opw,
+    opw_pd_from_channels,
+    power_doppler,
+    rc_fmas_pd,
+    simulate_point,
+    st_sw_pd,
+    xdoppler_pd,
+    xdoppler_pd_from_channels,
+)
+from rcabeam.sim import _scan_coords
+
+console = Console()
+
+
+@dataclass(frozen=True)
+class Timing:
+    """Benchmark timing result."""
+
+    group: str
+    name: str
+    best_ms: float
+    note: str = ""
+
+
+def _time(group: str, name: str, func: Callable[[], Any], *, repeat: int = 3, note: str = "") -> tuple[Any, Timing]:
+    """Time a callable and return its best runtime."""
+    best = float("inf")
+    result = None
+    for _ in range(repeat):
+        start = perf_counter()
+        result = func()
+        best = min(best, perf_counter() - start)
+    return result, Timing(group, name, best * 1e3, note)
+
+
+def _delay_breakdown(
+    iq_ch: np.ndarray,
+    angles: np.ndarray,
+    t_start: float,
+    grid: tuple[np.ndarray, np.ndarray, np.ndarray],
+    geom: RCAGeometry,
+    config: str,
+) -> dict[str, float]:
+    """Return copy and kernel timing for the CUDA delay wrapper."""
+    from rcabeam._cuda_impl import delay_rca_channels_timed
+
+    scan = _scan_coords(grid)
+    starts = np.ascontiguousarray(np.broadcast_to(np.asarray(t_start, dtype=np.float32), (len(angles),)))
+    elements = geom.x_el if config == "RC" else geom.y_el
+    out = np.empty((scan.shape[0], len(angles)), dtype=np.complex64)
+    copy_in_ms, kernel_ms, copy_out_ms, total_ms = delay_rca_channels_timed(
+        np.ascontiguousarray(iq_ch, dtype=np.complex64),
+        scan,
+        np.ascontiguousarray(elements, dtype=np.float32),
+        np.ascontiguousarray(angles, dtype=np.float32),
+        starts,
+        out,
+        0 if config == "RC" else 1,
+        float(geom.c),
+        float(geom.fs),
+        float(geom.f_demod),
+        -1.0 if geom.fnumber is None else float(geom.fnumber),
+    )
+    samples = scan.shape[0] * len(angles) * len(elements)
+    return {
+        "copy_in_ms": copy_in_ms,
+        "kernel_ms": kernel_ms,
+        "copy_out_ms": copy_out_ms,
+        "total_ms": total_ms,
+        "throughput_gsamples_s": samples / kernel_ms / 1e6,
+    }
+
+
+def _render_setup(n_voxels: int, n_elements: int, n_angles: int, n_grid: int, f0: float) -> None:
+    """Print benchmark setup."""
+    table = Table(title="RCA benchmark setup")
+    table.add_column("Parameter", style="bold")
+    table.add_column("Value", justify="right")
+    table.add_row("Frequency", f"{f0 / 1e6:.1f} MHz")
+    table.add_row("Grid", f"{n_grid}³ = {n_voxels:,} voxels")
+    table.add_row("RCA elements", f"{n_elements} row + {n_elements} column")
+    table.add_row("Angles", f"{n_angles} RC + {n_angles} CR")
+    console.print(table)
+
+
+def _render_breakdowns(rows: list[tuple[str, dict[str, float]]]) -> None:
+    """Print detailed CUDA delay timings."""
+    table = Table(title="CUDA delay breakdown")
+    table.add_column("Config", style="bold")
+    table.add_column("Copy in", justify="right")
+    table.add_column("Kernel", justify="right")
+    table.add_column("Copy out", justify="right")
+    table.add_column("Total", justify="right")
+    table.add_column("Throughput", justify="right")
+    for name, row in rows:
+        table.add_row(
+            name,
+            f"{row['copy_in_ms']:.2f} ms",
+            f"{row['kernel_ms']:.2f} ms",
+            f"{row['copy_out_ms']:.2f} ms",
+            f"{row['total_ms']:.2f} ms",
+            f"{row['throughput_gsamples_s']:.1f} Gsample/s",
+        )
+    console.print(table)
+
+
+def _render_timings(timings: list[Timing]) -> None:
+    """Print grouped benchmark timings."""
+    table = Table(title="Benchmark results")
+    table.add_column("Group", style="bold")
+    table.add_column("Operation")
+    table.add_column("Best", justify="right")
+    table.add_column("Note")
+    for timing in timings:
+        table.add_row(timing.group, timing.name, f"{timing.best_ms:.2f} ms", timing.note)
+    console.print(table)
+
+
+def main() -> None:
+    """Run a synthetic RCA benchmark."""
+    f0 = 15e6
+    pitch = 0.1e-3
+    n_elements = 80
+    n_grid = 80  # dev preset. Use 160 for ~lambda/2 sampling over 8 mm at 15 MHz.
+    elements = (np.arange(n_elements) - (n_elements - 1) / 2) * pitch
+    geom = RCAGeometry(x_el=elements, y_el=elements, fs=4 * f0, f_demod=f0, fnumber=1.0)
+    n_angles = 16
+    angles = np.deg2rad(np.linspace(-8, 8, n_angles))
+    scatterers = [
+        ((0.0, 8.0e-3, 0.0), 1.0),
+        ((-2.2e-3, 6.0e-3, 1.8e-3), 0.8),
+        ((2.0e-3, 9.5e-3, -1.5e-3), 0.7),
+        ((-1.2e-3, 11.2e-3, -2.4e-3), 0.6),
+        ((2.6e-3, 7.2e-3, 2.5e-3), 0.5),
+    ]
+    t_start = 2e-6
+    nsamp = 1100
+    x = np.linspace(-4e-3, 4e-3, n_grid)
+    z = np.linspace(4e-3, 12e-3, n_grid)
+    y = np.linspace(-4e-3, 4e-3, n_grid)
+    grid = (x, z, y)
+    n_voxels = len(x) * len(z) * len(y)
+
+    _render_setup(n_voxels, n_elements, n_angles, n_grid, f0)
+
+    rc_ch = sum(amp * simulate_point(geom, angles, point, nsamp, t_start, "RC") for point, amp in scatterers)
+    cr_ch = sum(amp * simulate_point(geom, angles, point, nsamp, t_start, "CR") for point, amp in scatterers)
+
+    delay_rca_channels(rc_ch, angles, t_start, grid, geom, "RC")  # warm CUDA context and allocator.
+    _render_breakdowns([
+        ("RC", _delay_breakdown(rc_ch, angles, t_start, grid, geom, "RC")),
+        ("CR", _delay_breakdown(cr_ch, angles, t_start, grid, geom, "CR")),
+    ])
+
+    timings: list[Timing] = []
+    rc, timing = _time("Delay", "RC per-angle CUDA", lambda: delay_rca_channels(rc_ch, angles, t_start, grid, geom, "RC"), repeat=5)
+    timings.append(timing)
+    cr, timing = _time("Delay", "CR per-angle CUDA", lambda: delay_rca_channels(cr_ch, angles, t_start, grid, geom, "CR"), repeat=5)
+    timings.append(timing)
+    _, timing = _time(
+        "Delay",
+        "RC per-angle NumPy",
+        lambda: delay_rca_channels(rc_ch, angles, t_start, grid, geom, "RC", use_cuda=False),
+        repeat=1,
+        note="reference only",
+    )
+    timings.append(timing)
+    _, timing = _time("Delay", "RC channel-data CUDA", lambda: delay_rca_channel_data(rc_ch, angles, t_start, grid, geom, "RC"), repeat=5)
+    timings.append(timing)
+    _, timing = _time(
+        "Delay",
+        "RC channel-data NumPy",
+        lambda: delay_rca_channel_data(rc_ch, angles, t_start, grid, geom, "RC", use_cuda=False),
+        repeat=1,
+        note="reference only",
+    )
+    timings.append(timing)
+
+    iq = np.concatenate([rc, cr], axis=-1)[..., None]
+    rc_idx = np.arange(len(angles))
+    cr_idx = np.arange(len(angles), 2 * len(angles))
+
+    staged_delay_ms = timings[0].best_ms + timings[1].best_ms
+    for name, func, repeat, note in [
+        ("OPW PD staged", lambda: power_doppler(opw(iq)), 10, f"+ delay ≈ {staged_delay_ms:.1f} ms"),
+        ("OPW PD fused channels", lambda: opw_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom), 10, "channel → PD"),
+        ("XDoppler PD staged", lambda: xdoppler_pd(iq, rc_idx, cr_idx), 10, f"+ delay ≈ {staged_delay_ms:.1f} ms"),
+        (
+            "XDoppler PD fused channels",
+            lambda: xdoppler_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom),
+            10,
+            "channel → PD",
+        ),
+        ("RC-FMAS PD", lambda: rc_fmas_pd(iq, rc_idx, cr_idx), 10, f"+ delay ≈ {staged_delay_ms:.1f} ms"),
+        ("St-SW PD", lambda: st_sw_pd(iq, rc_idx, cr_idx, k=2), 3, f"+ delay ≈ {staged_delay_ms:.1f} ms"),
+        (
+            "DMAS-CCF-ACF frame",
+            lambda: dmas_ccf_acf_frame(rc_ch, cr_ch, angles, angles, t_start, t_start, grid, geom),
+            3,
+            "includes channel-data delay",
+        ),
+    ]:
+        _, timing = _time("Method", name, func, repeat=repeat, note=note)
+        timings.append(timing)
+
+    _render_timings(timings)
+    console.print("[bold]Fusion plan:[/bold] yes, but fuse the methods used in real time first: OPW/XDoppler done, RC-FMAS next; St-SW/DMAS after profiling.")
+
+
+if __name__ == "__main__":
+    main()

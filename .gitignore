@@ -1,0 +1,10 @@
+.venv/
+build/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*.so
+
+# Generated example outputs
+*.png
