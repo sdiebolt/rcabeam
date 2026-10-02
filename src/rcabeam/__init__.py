@@ -2,7 +2,7 @@
 
 from rcabeam.dmas import dmas_bruteforce, dmas_ccf_acf_core, dmas_ccf_acf_frame
 from rcabeam.fmas import rc_fmas, rc_fmas_pd, signed_sqrt
-from rcabeam.fused import opw_pd_from_channels, xdoppler_pd_from_channels
+from rcabeam.fused import opw_pd_from_channels, rc_fmas_pd_from_channels, xdoppler_pd_from_channels
 from rcabeam.opw import opw, opw_numpy
 from rcabeam.power import power_doppler
 from rcabeam.sim import RCAGeometry, delay_rca_channel_data, delay_rca_channels, simulate_point
@@ -23,6 +23,7 @@ __all__ = [
     "power_doppler",
     "rc_fmas",
     "rc_fmas_pd",
+    "rc_fmas_pd_from_channels",
     "signed_sqrt",
     "simulate_point",
     "st_sw_pd",

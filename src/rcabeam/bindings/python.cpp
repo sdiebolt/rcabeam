@@ -312,7 +312,7 @@ void fused_pd_from_channels(
     float sampling_freq_hz,
     float demod_freq_hz,
     float f_number,
-    bool xdoppler
+    int mode
 ) {
     size_t n_samples = iq_rc.shape(0);
     size_t n_channels = iq_rc.shape(1);
@@ -340,15 +340,23 @@ void fused_pd_from_channels(
     const float* d_tstart = device_input(t_start_s, owned_tstart);
     float* d_out = out.device_type() == nb::device::cpu::value ? owned_out.ptr : out.data();
 
-    rcabeam_status status = xdoppler
-        ? rcabeam_xdoppler_pd_from_channels_device(
-            d_rc, d_cr, d_scan, d_x, d_y, d_angles, d_tstart, d_out,
-            n_samples, n_channels, n_angles, n_voxels, sound_speed_m_s, sampling_freq_hz, demod_freq_hz, f_number
-        )
-        : rcabeam_opw_pd_from_channels_device(
+    rcabeam_status status = RCABEAM_ERROR_ARGUMENT;
+    if (mode == 0) {
+        status = rcabeam_opw_pd_from_channels_device(
             d_rc, d_cr, d_scan, d_x, d_y, d_angles, d_tstart, d_out,
             n_samples, n_channels, n_angles, n_voxels, sound_speed_m_s, sampling_freq_hz, demod_freq_hz, f_number
         );
+    } else if (mode == 1) {
+        status = rcabeam_xdoppler_pd_from_channels_device(
+            d_rc, d_cr, d_scan, d_x, d_y, d_angles, d_tstart, d_out,
+            n_samples, n_channels, n_angles, n_voxels, sound_speed_m_s, sampling_freq_hz, demod_freq_hz, f_number
+        );
+    } else if (mode == 2) {
+        status = rcabeam_rc_fmas_pd_from_channels_device(
+            d_rc, d_cr, d_scan, d_x, d_y, d_angles, d_tstart, d_out,
+            n_samples, n_channels, n_angles, n_voxels, sound_speed_m_s, sampling_freq_hz, demod_freq_hz, f_number
+        );
+    }
     check_status(status);
     check_cuda(cudaDeviceSynchronize());
     if (out.device_type() == nb::device::cpu::value) check_cuda(cudaMemcpy(out.data(), d_out, out.nbytes(), cudaMemcpyDeviceToHost));
@@ -368,7 +376,7 @@ void opw_pd_from_channels(
     float demod_freq_hz,
     float f_number
 ) {
-    fused_pd_from_channels(iq_rc, iq_cr, scan_coords_m, x_elements_m, y_elements_m, angles_rad, t_start_s, out, sound_speed_m_s, sampling_freq_hz, demod_freq_hz, f_number, false);
+    fused_pd_from_channels(iq_rc, iq_cr, scan_coords_m, x_elements_m, y_elements_m, angles_rad, t_start_s, out, sound_speed_m_s, sampling_freq_hz, demod_freq_hz, f_number, 0);
 }
 
 void xdoppler_pd_from_channels(
@@ -385,7 +393,24 @@ void xdoppler_pd_from_channels(
     float demod_freq_hz,
     float f_number
 ) {
-    fused_pd_from_channels(iq_rc, iq_cr, scan_coords_m, x_elements_m, y_elements_m, angles_rad, t_start_s, out, sound_speed_m_s, sampling_freq_hz, demod_freq_hz, f_number, true);
+    fused_pd_from_channels(iq_rc, iq_cr, scan_coords_m, x_elements_m, y_elements_m, angles_rad, t_start_s, out, sound_speed_m_s, sampling_freq_hz, demod_freq_hz, f_number, 1);
+}
+
+void rc_fmas_pd_from_channels(
+    nb::ndarray<const std::complex<float>, nb::ndim<3>, nb::c_contig> iq_rc,
+    nb::ndarray<const std::complex<float>, nb::ndim<3>, nb::c_contig> iq_cr,
+    nb::ndarray<const float, nb::shape<-1, 3>, nb::c_contig> scan_coords_m,
+    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> x_elements_m,
+    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> y_elements_m,
+    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> angles_rad,
+    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> t_start_s,
+    nb::ndarray<float, nb::ndim<1>, nb::c_contig> out,
+    float sound_speed_m_s,
+    float sampling_freq_hz,
+    float demod_freq_hz,
+    float f_number
+) {
+    fused_pd_from_channels(iq_rc, iq_cr, scan_coords_m, x_elements_m, y_elements_m, angles_rad, t_start_s, out, sound_speed_m_s, sampling_freq_hz, demod_freq_hz, f_number, 2);
 }
 
 NB_MODULE(_cuda_impl, m) {
@@ -427,6 +452,22 @@ NB_MODULE(_cuda_impl, m) {
     m.def(
         "xdoppler_pd_from_channels",
         &xdoppler_pd_from_channels,
+        "iq_rc"_a.noconvert(),
+        "iq_cr"_a.noconvert(),
+        "scan_coords_m"_a.noconvert(),
+        "x_elements_m"_a.noconvert(),
+        "y_elements_m"_a.noconvert(),
+        "angles_rad"_a.noconvert(),
+        "t_start_s"_a.noconvert(),
+        "out"_a.noconvert(),
+        "sound_speed_m_s"_a,
+        "sampling_freq_hz"_a,
+        "demod_freq_hz"_a,
+        "f_number"_a
+    );
+    m.def(
+        "rc_fmas_pd_from_channels",
+        &rc_fmas_pd_from_channels,
         "iq_rc"_a.noconvert(),
         "iq_cr"_a.noconvert(),
         "scan_coords_m"_a.noconvert(),

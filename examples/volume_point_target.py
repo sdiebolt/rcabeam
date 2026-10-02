@@ -40,6 +40,28 @@ def _db(image: np.ndarray) -> np.ndarray:
     return 10 * np.log10(image / image.max() + 1e-12)
 
 
+def _plot_comparison(volumes: dict[str, np.ndarray], x: np.ndarray, z: np.ndarray, y: np.ndarray, path: str) -> None:
+    """Save x-z center slices for several volumes side by side."""
+    iy = len(y) // 2
+    fig, axes = plt.subplots(1, len(volumes), figsize=(4 * len(volumes), 4), squeeze=False)
+    for ax, (name, volume) in zip(axes[0], volumes.items(), strict=True):
+        ax.imshow(
+            _db(volume)[:, :, iy].T,
+            extent=[x[0] * 1e3, x[-1] * 1e3, z[-1] * 1e3, z[0] * 1e3],
+            aspect="auto",
+            cmap="gray",
+            vmin=DISPLAY_FLOOR_DB,
+            vmax=0,
+        )
+        ax.set_title(name)
+        ax.set_xlabel("x [mm]")
+    axes[0][0].set_ylabel("z [mm]")
+    fig.suptitle("RCA vs dense matrix reference")
+    fig.savefig(path, dpi=200)
+    plt.close(fig)
+    print(f"wrote {path}")
+
+
 def _plot_slices(volume_db: np.ndarray, x: np.ndarray, z: np.ndarray, y: np.ndarray, title: str, path: str) -> None:
     """Save orthogonal center slices plus nearby z slices."""
     ix, iz, iy = len(x) // 2, len(z) // 2, len(y) // 2
@@ -135,6 +157,38 @@ def main() -> None:
     _plot_slices(_db(stsw_volume), x, z, y, "RCA St-SW scatterers", "rca_stsw_volume_slices.png")
     _plot_slices(_db(dmas_volume), x, z, y, "RCA DMAS-CCF-ACF scatterers", "rca_dmas_ccf_acf_volume_slices.png")
 
+    matrix_volume = None
+    if args.matrix:
+        from matrix_reference import _matrix_das_compound, _matrix_positions, _scan_grid
+
+        rx_coords = _matrix_positions(args.matrix_side, pitch)
+        scan = _scan_grid(x, z, y)
+        matrix_iq = _matrix_das_compound(
+            rx_coords,
+            scan,
+            scatterers,
+            n_angles_side=args.matrix_angles,
+            angle_limit=8.0,
+            nsamp=nsamp,
+            t_start=t_start,
+            fs=geom.fs,
+            f0=f0,
+            c=c,
+        )
+        matrix_volume = np.abs(matrix_iq.reshape((len(x), len(z), len(y)))) ** 2
+        _plot_comparison(
+            {
+                "Dense matrix": matrix_volume,
+                "RCA OPW": opw_volume,
+                "RCA XDoppler": xdoppler_volume,
+                "RCA RC-FMAS": fmas_volume,
+            },
+            x,
+            z,
+            y,
+            "rca_vs_matrix_slices.png",
+        )
+
     if args.napari:
         os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
         import napari
@@ -142,24 +196,7 @@ def main() -> None:
         viewer = napari.Viewer()
         scale = (np.diff(z).mean() * 1e3, np.diff(y).mean() * 1e3, np.diff(x).mean() * 1e3)
         layers = []
-        if args.matrix:
-            from matrix_reference import _matrix_das_compound, _matrix_positions, _scan_grid
-
-            rx_coords = _matrix_positions(args.matrix_side, pitch)
-            scan = _scan_grid(x, z, y)
-            matrix_iq = _matrix_das_compound(
-                rx_coords,
-                scan,
-                scatterers,
-                n_angles_side=args.matrix_angles,
-                angle_limit=8.0,
-                nsamp=nsamp,
-                t_start=t_start,
-                fs=geom.fs,
-                f0=f0,
-                c=c,
-            )
-            matrix_volume = np.abs(matrix_iq.reshape((len(x), len(z), len(y)))) ** 2
+        if matrix_volume is not None:
             layers.append(
                 viewer.add_image(
                     _db(matrix_volume).transpose(1, 2, 0),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from rcabeam.fmas import rc_fmas_pd
 from rcabeam.opw import opw
 from rcabeam.power import power_doppler
 from rcabeam.sim import RCAGeometry, _scan_coords, delay_rca_channels
@@ -87,6 +88,52 @@ def opw_pd_from_channels(
     rc = delay_rca_channels(iq_rc, angles, t_start, grid, geom, "RC", use_cuda=False)
     cr = delay_rca_channels(iq_cr, angles, t_start, grid, geom, "CR", use_cuda=False)
     return power_doppler(opw(np.concatenate([rc, cr], axis=-1)[..., None]))
+
+
+def rc_fmas_pd_from_channels(
+    iq_rc: np.ndarray,
+    iq_cr: np.ndarray,
+    angles: np.ndarray,
+    t_start: float | np.ndarray,
+    grid: tuple[np.ndarray, np.ndarray, np.ndarray],
+    geom: RCAGeometry,
+    *,
+    use_cuda: bool = True,
+) -> np.ndarray:
+    """Compute RC-FMAS power directly from RC and CR channel data.
+
+    Parameters
+    ----------
+    iq_rc
+        RC channel IQ data with shape `(n_samples, n_channels, n_angles)`.
+    iq_cr
+        CR channel IQ data with shape `(n_samples, n_channels, n_angles)`.
+    angles
+        Plane-wave steering angles in radians.
+    t_start
+        First sample time, scalar or one value per angle.
+    grid
+        Coordinate vectors `(x, z, y)` in meters.
+    geom
+        RCA geometry.
+    use_cuda
+        Use fused CUDA implementation when available.
+
+    Returns
+    -------
+    np.ndarray
+        RC-FMAS power volume with shape `(nx, nz, ny)`.
+    """
+    if use_cuda:
+        out = _run_fused_pd("rc_fmas_pd_from_channels", iq_rc, iq_cr, angles, t_start, grid, geom)
+        if out is not None:
+            return out
+
+    rc = delay_rca_channels(iq_rc, angles, t_start, grid, geom, "RC", use_cuda=False)
+    cr = delay_rca_channels(iq_cr, angles, t_start, grid, geom, "CR", use_cuda=False)
+    rc_idx = np.arange(len(angles))
+    cr_idx = np.arange(len(angles), 2 * len(angles))
+    return rc_fmas_pd(np.concatenate([rc, cr], axis=-1)[..., None], rc_idx, cr_idx, use_cuda=False)
 
 
 def xdoppler_pd_from_channels(

@@ -6,6 +6,7 @@ Run:
 
 from __future__ import annotations
 
+import argparse
 from collections.abc import Callable
 from dataclasses import dataclass
 from time import perf_counter
@@ -24,6 +25,7 @@ from rcabeam import (
     opw_pd_from_channels,
     power_doppler,
     rc_fmas_pd,
+    rc_fmas_pd_from_channels,
     simulate_point,
     st_sw_pd,
     xdoppler_pd,
@@ -140,13 +142,22 @@ def _render_timings(timings: list[Timing]) -> None:
 
 def main() -> None:
     """Run a synthetic RCA benchmark."""
-    f0 = 15e6
-    pitch = 0.1e-3
-    n_elements = 80
-    n_grid = 80  # dev preset. Use 160 for ~lambda/2 sampling over 8 mm at 15 MHz.
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--grid", type=int, default=80, help="Voxels per x/z/y axis.")
+    parser.add_argument("--elements", type=int, default=80, help="RCA row/column elements per aperture.")
+    parser.add_argument("--angles", type=int, default=16, help="Plane waves per RC/CR aperture.")
+    parser.add_argument("--frequency", type=float, default=15e6, help="Center frequency in Hz.")
+    parser.add_argument("--pitch", type=float, default=0.1e-3, help="Element pitch in meters.")
+    parser.add_argument("--quality", action="store_true", help="Use 160³ lambda/2-ish grid preset.")
+    args = parser.parse_args()
+
+    f0 = args.frequency
+    pitch = args.pitch
+    n_elements = args.elements
+    n_grid = 160 if args.quality else args.grid
     elements = (np.arange(n_elements) - (n_elements - 1) / 2) * pitch
     geom = RCAGeometry(x_el=elements, y_el=elements, fs=4 * f0, f_demod=f0, fnumber=1.0)
-    n_angles = 16
+    n_angles = args.angles
     angles = np.deg2rad(np.linspace(-8, 8, n_angles))
     scatterers = [
         ((0.0, 8.0e-3, 0.0), 1.0),
@@ -213,7 +224,8 @@ def main() -> None:
             10,
             "channel → PD",
         ),
-        ("RC-FMAS PD", lambda: rc_fmas_pd(iq, rc_idx, cr_idx), 10, f"+ delay ≈ {staged_delay_ms:.1f} ms"),
+        ("RC-FMAS PD staged", lambda: rc_fmas_pd(iq, rc_idx, cr_idx), 10, f"+ delay ≈ {staged_delay_ms:.1f} ms"),
+        ("RC-FMAS PD fused channels", lambda: rc_fmas_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom), 10, "channel → PD"),
         ("St-SW PD", lambda: st_sw_pd(iq, rc_idx, cr_idx, k=2), 3, f"+ delay ≈ {staged_delay_ms:.1f} ms"),
         (
             "DMAS-CCF-ACF frame",
@@ -226,7 +238,7 @@ def main() -> None:
         timings.append(timing)
 
     _render_timings(timings)
-    console.print("[bold]Fusion plan:[/bold] yes, but fuse the methods used in real time first: OPW/XDoppler done, RC-FMAS next; St-SW/DMAS after profiling.")
+    console.print("[bold]Fusion plan:[/bold] OPW, XDoppler, and RC-FMAS channel→PD paths are fused. Next fuse only St-SW/DMAS if profiling justifies it.")
 
 
 if __name__ == "__main__":

@@ -440,3 +440,67 @@ rcabeam_status rcabeam_xdoppler_pd_from_channels_device(
     );
     return launch_status();
 }
+
+__global__ void rc_fmas_pd_from_channels_kernel(
+    const float2* iq_rc,
+    const float2* iq_cr,
+    const float* scan_coords,
+    const float* x_elements,
+    const float* y_elements,
+    const float* angles,
+    const float* t_start,
+    float* out,
+    size_t n_samples,
+    size_t n_channels,
+    size_t n_angles,
+    size_t n_voxels,
+    float c,
+    float fs,
+    float f_demod,
+    float f_number
+) {
+    size_t voxel = blockIdx.x * blockDim.x + threadIdx.x;
+    if (voxel >= n_voxels) return;
+    float2 rc = make_float2(0.0f, 0.0f);
+    float2 cr = make_float2(0.0f, 0.0f);
+    for (size_t angle = 0; angle < n_angles; ++angle) {
+        float2 rc_angle = make_float2(0.0f, 0.0f);
+        float2 cr_angle = make_float2(0.0f, 0.0f);
+        for (size_t ch = 0; ch < n_channels; ++ch) {
+            rc_angle = cadd(rc_angle, delay_sample(iq_rc, scan_coords, x_elements, angles, t_start, n_samples, n_channels, n_angles, voxel, ch, angle, 0, c, fs, f_demod, f_number));
+            cr_angle = cadd(cr_angle, delay_sample(iq_cr, scan_coords, y_elements, angles, t_start, n_samples, n_channels, n_angles, voxel, ch, angle, 1, c, fs, f_demod, f_number));
+        }
+        rc = cadd(rc, signed_sqrt(rc_angle));
+        cr = cadd(cr, signed_sqrt(cr_angle));
+    }
+    out[voxel] = cabs2(cmul(rc, cr));
+}
+
+rcabeam_status rcabeam_rc_fmas_pd_from_channels_device(
+    const void* iq_rc,
+    const void* iq_cr,
+    const float* scan_coords_m,
+    const float* x_elements_m,
+    const float* y_elements_m,
+    const float* angles_rad,
+    const float* t_start_s,
+    float* out,
+    size_t n_samples,
+    size_t n_channels,
+    size_t n_angles,
+    size_t n_voxels,
+    float sound_speed_m_s,
+    float sampling_freq_hz,
+    float demod_freq_hz,
+    float f_number
+) {
+    if (invalid_delay_args(iq_rc, scan_coords_m, x_elements_m, angles_rad, t_start_s, out, n_samples, n_channels, n_angles, n_voxels, 0)) return RCABEAM_ERROR_ARGUMENT;
+    if (iq_cr == nullptr || y_elements_m == nullptr) return RCABEAM_ERROR_ARGUMENT;
+    int threads = 128;
+    int blocks = static_cast<int>((n_voxels + threads - 1) / threads);
+    rc_fmas_pd_from_channels_kernel<<<blocks, threads>>>(
+        static_cast<const float2*>(iq_rc), static_cast<const float2*>(iq_cr), scan_coords_m, x_elements_m, y_elements_m,
+        angles_rad, t_start_s, out, n_samples, n_channels, n_angles, n_voxels, sound_speed_m_s, sampling_freq_hz, demod_freq_hz, f_number
+    );
+    return launch_status();
+}

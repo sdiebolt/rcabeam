@@ -10,6 +10,7 @@ from rcabeam import (
     opw_numpy,
     opw_pd_from_channels,
     rc_fmas_pd,
+    rc_fmas_pd_from_channels,
     simulate_point,
     xdoppler_pd,
     xdoppler_pd_from_channels,
@@ -97,6 +98,24 @@ def test_fused_xdoppler_pd_from_channels_matches_staged_reference() -> None:
     cr_idx = np.arange(len(angles), 2 * len(angles))
     expected = xdoppler_pd(np.concatenate([rc_vol, cr_vol], axis=-1)[..., None], rc_idx, cr_idx, use_cuda=False)
     np.testing.assert_allclose(xdoppler_pd_from_channels(rc, cr, angles, 8e-6, grid, geom), expected, rtol=1e-4, atol=1e-4)
+
+
+def test_fused_rc_fmas_pd_from_channels_matches_staged_reference() -> None:
+    """Fused RC-FMAS channel path matches staged delay plus RC-FMAS."""
+    f0 = 6e6
+    el = (np.arange(10) - 9 / 2) * 0.2e-3
+    geom = RCAGeometry(x_el=el, y_el=el, fs=4 * f0, f_demod=f0)
+    angles = np.deg2rad(np.linspace(-4, 4, 3))
+    grid = (np.linspace(-0.4e-3, 0.4e-3, 3), np.linspace(11.8e-3, 12.2e-3, 4), np.linspace(-0.4e-3, 0.4e-3, 3))
+    point = (0.0, 12e-3, 0.0)
+    rc = simulate_point(geom, angles, point, 320, 8e-6, "RC")
+    cr = simulate_point(geom, angles, point, 320, 8e-6, "CR")
+    rc_vol = delay_rca_channels(rc, angles, 8e-6, grid, geom, "RC", use_cuda=False)
+    cr_vol = delay_rca_channels(cr, angles, 8e-6, grid, geom, "CR", use_cuda=False)
+    rc_idx = np.arange(len(angles))
+    cr_idx = np.arange(len(angles), 2 * len(angles))
+    expected = rc_fmas_pd(np.concatenate([rc_vol, cr_vol], axis=-1)[..., None], rc_idx, cr_idx, use_cuda=False)
+    np.testing.assert_allclose(rc_fmas_pd_from_channels(rc, cr, angles, 8e-6, grid, geom), expected, rtol=1e-4, atol=1e-4)
 
 
 def test_delay_rca_channel_data_cuda_matches_python_reference() -> None:
