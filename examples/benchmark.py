@@ -193,6 +193,14 @@ def main() -> None:
         note="channel → 3 PD volumes",
     )
     timings.append(timing)
+    _, timing = _time(
+        "Method",
+        "DMAS-CCF-ACF fused channels",
+        lambda: dmas_ccf_acf_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom),
+        repeat=3,
+        note="channel → DMAS-CCF-ACF",
+    )
+    timings.append(timing)
     if not args.full:
         _render_timings(timings)
         return
@@ -250,14 +258,6 @@ def main() -> None:
         _, timing = _time("Method", name, func, repeat=10, note="channel → PD")
         timings.append(timing)
 
-    _, timing = _time(
-        "Method",
-        "DMAS-CCF-ACF fused channels",
-        lambda: dmas_ccf_acf_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom),
-        repeat=3,
-        note="channel → DMAS-CCF-ACF",
-    )
-    timings.append(timing)
     _, timing = _time(
         "Method",
         "DMAS-CCF-ACF frame",
