@@ -59,6 +59,12 @@ Quality-ish grid preset:
 uv run python examples/benchmark.py --quality
 ```
 
+## Storage estimate
+
+```bash
+uv run python examples/storage_estimate.py
+```
+
 ## Napari visualization
 
 Fast fused channel-to-power methods only:
