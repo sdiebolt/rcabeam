@@ -185,22 +185,14 @@ def main() -> None:
 
     timings: list[Timing] = []
     fast_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)  # warm CUDA context and allocator.
-    _, timing = _time(
-        "Method",
-        "OPW+XDoppler+RC-FMAS fused",
-        lambda: fast_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom),
-        repeat=10,
-        note="channel → 3 PD volumes",
-    )
-    timings.append(timing)
-    _, timing = _time(
-        "Method",
-        "DMAS-CCF-ACF fused channels",
-        lambda: dmas_ccf_acf_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom),
-        repeat=3,
-        note="channel → DMAS-CCF-ACF",
-    )
-    timings.append(timing)
+    for name, func, repeat, note in [
+        ("OPW PD fused channels", lambda: opw_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom), 10, "channel → PD"),
+        ("XDoppler PD fused channels", lambda: xdoppler_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom), 10, "channel → PD"),
+        ("RC-FMAS PD fused channels", lambda: rc_fmas_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom), 10, "channel → PD"),
+        ("DMAS-CCF-ACF fused channels", lambda: dmas_ccf_acf_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom), 3, "channel → DMAS-CCF-ACF"),
+    ]:
+        _, timing = _time("Method", name, func, repeat=repeat, note=note)
+        timings.append(timing)
     if not args.full:
         _render_timings(timings)
         return
@@ -250,13 +242,14 @@ def main() -> None:
         timings.append(timing)
         timings.append(Timing("Total", f"{name} staged total", staged_delay_ms + timing.best_ms, "delay + post"))
 
-    for name, func in [
-        ("OPW PD fused channels", lambda: opw_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)),
-        ("XDoppler PD fused channels", lambda: xdoppler_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)),
-        ("RC-FMAS PD fused channels", lambda: rc_fmas_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)),
-    ]:
-        _, timing = _time("Method", name, func, repeat=10, note="channel → PD")
-        timings.append(timing)
+    _, timing = _time(
+        "Method",
+        "OPW+XDoppler+RC-FMAS fused",
+        lambda: fast_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom),
+        repeat=10,
+        note="diagnostic: channel → 3 PD volumes",
+    )
+    timings.append(timing)
 
     _, timing = _time(
         "Method",
