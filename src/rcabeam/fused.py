@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import numpy as np
 
+from rcabeam.dmas import dmas_ccf_acf_core
 from rcabeam.fmas import rc_fmas_pd
 from rcabeam.opw import opw
 from rcabeam.power import power_doppler
-from rcabeam.sim import RCAGeometry, _scan_coords, delay_rca_channels
+from rcabeam.sim import RCAGeometry, _scan_coords, delay_rca_channel_data, delay_rca_channels
 from rcabeam.xdoppler import xdoppler_pd
 
 
@@ -113,6 +114,51 @@ def fast_pd_from_channels(
         xdoppler_pd_from_channels(iq_rc, iq_cr, angles, t_start, grid, geom, use_cuda=False),
         rc_fmas_pd_from_channels(iq_rc, iq_cr, angles, t_start, grid, geom, use_cuda=False),
     )
+
+
+def dmas_ccf_acf_from_channels(
+    iq_rc: np.ndarray,
+    iq_cr: np.ndarray,
+    angles: np.ndarray,
+    t_start: float | np.ndarray,
+    grid: tuple[np.ndarray, np.ndarray, np.ndarray],
+    geom: RCAGeometry,
+    *,
+    use_cuda: bool = True,
+) -> np.ndarray:
+    """Compute DMAS-CCF-ACF directly from RC and CR channel data.
+
+    Parameters
+    ----------
+    iq_rc
+        RC channel IQ data with shape `(n_samples, n_channels, n_angles)`.
+    iq_cr
+        CR channel IQ data with shape `(n_samples, n_channels, n_angles)`.
+    angles
+        Plane-wave steering angles in radians.
+    t_start
+        First sample time, scalar or one value per angle.
+    grid
+        Coordinate vectors `(x, z, y)` in meters.
+    geom
+        RCA geometry.
+    use_cuda
+        Use fused CUDA implementation when available.
+
+    Returns
+    -------
+    np.ndarray
+        DMAS-CCF-ACF volume with shape `(nx, nz, ny)`.
+    """
+    if use_cuda:
+        out = _run_fused_pd("dmas_ccf_acf_from_channels", iq_rc, iq_cr, angles, t_start, grid, geom)
+        if out is not None:
+            return out
+
+    s_rc, a_rc, n_rc = delay_rca_channel_data(iq_rc, angles, t_start, grid, geom, "RC", use_cuda=False)
+    s_cr, a_cr, n_cr = delay_rca_channel_data(iq_cr, angles, t_start, grid, geom, "CR", use_cuda=False)
+    y_dmas, w_ccf, w_acf = dmas_ccf_acf_core(s_rc, s_cr, a_rc, a_cr, ccf_norm=n_rc + n_cr)
+    return y_dmas * w_ccf * w_acf
 
 
 def opw_pd_from_channels(

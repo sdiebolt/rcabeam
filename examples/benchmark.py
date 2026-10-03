@@ -21,6 +21,7 @@ from rcabeam import (
     delay_rca_channel_data,
     delay_rca_channels,
     dmas_ccf_acf_frame,
+    dmas_ccf_acf_from_channels,
     fast_pd_from_channels,
     opw,
     opw_pd_from_channels,
@@ -251,15 +252,23 @@ def main() -> None:
 
     _, timing = _time(
         "Method",
+        "DMAS-CCF-ACF fused channels",
+        lambda: dmas_ccf_acf_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom),
+        repeat=3,
+        note="channel → DMAS-CCF-ACF",
+    )
+    timings.append(timing)
+    _, timing = _time(
+        "Method",
         "DMAS-CCF-ACF frame",
         lambda: dmas_ccf_acf_frame(rc_ch, cr_ch, angles, angles, t_start, t_start, grid, geom),
         repeat=3,
-        note="includes channel-data delay",
+        note="staged reference",
     )
     timings.append(timing)
 
     _render_timings(timings)
-    console.print("[bold]Fusion plan:[/bold] fast OPW/XDoppler/RC-FMAS is realtime candidate; DMAS needs a dedicated algorithmic kernel, not just wrapper fusion.")
+    console.print("[bold]Fusion plan:[/bold] OPW/XDoppler/RC-FMAS and DMAS-CCF-ACF now have fused channel paths; next optimize memory coalescing if profiling justifies it.")
 
 
 if __name__ == "__main__":

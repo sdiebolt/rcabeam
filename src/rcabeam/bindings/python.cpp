@@ -356,6 +356,11 @@ void fused_pd_from_channels(
             d_rc, d_cr, d_scan, d_x, d_y, d_angles, d_tstart, d_out,
             n_samples, n_channels, n_angles, n_voxels, sound_speed_m_s, sampling_freq_hz, demod_freq_hz, f_number
         );
+    } else if (mode == 3) {
+        status = rcabeam_dmas_ccf_acf_from_channels_device(
+            d_rc, d_cr, d_scan, d_x, d_y, d_angles, d_tstart, d_out,
+            n_samples, n_channels, n_angles, n_voxels, sound_speed_m_s, sampling_freq_hz, demod_freq_hz, f_number
+        );
     }
     check_status(status);
     check_cuda(cudaDeviceSynchronize());
@@ -416,6 +421,23 @@ void fast_pd_from_channels(
     if (opw_out.device_type() == nb::device::cpu::value) check_cuda(cudaMemcpy(opw_out.data(), d_opw, opw_out.nbytes(), cudaMemcpyDeviceToHost));
     if (xdoppler_out.device_type() == nb::device::cpu::value) check_cuda(cudaMemcpy(xdoppler_out.data(), d_xdoppler, xdoppler_out.nbytes(), cudaMemcpyDeviceToHost));
     if (rc_fmas_out.device_type() == nb::device::cpu::value) check_cuda(cudaMemcpy(rc_fmas_out.data(), d_fmas, rc_fmas_out.nbytes(), cudaMemcpyDeviceToHost));
+}
+
+void dmas_ccf_acf_from_channels(
+    nb::ndarray<const std::complex<float>, nb::ndim<3>, nb::c_contig> iq_rc,
+    nb::ndarray<const std::complex<float>, nb::ndim<3>, nb::c_contig> iq_cr,
+    nb::ndarray<const float, nb::shape<-1, 3>, nb::c_contig> scan_coords_m,
+    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> x_elements_m,
+    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> y_elements_m,
+    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> angles_rad,
+    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> t_start_s,
+    nb::ndarray<float, nb::ndim<1>, nb::c_contig> out,
+    float sound_speed_m_s,
+    float sampling_freq_hz,
+    float demod_freq_hz,
+    float f_number
+) {
+    fused_pd_from_channels(iq_rc, iq_cr, scan_coords_m, x_elements_m, y_elements_m, angles_rad, t_start_s, out, sound_speed_m_s, sampling_freq_hz, demod_freq_hz, f_number, 3);
 }
 
 void opw_pd_from_channels(
@@ -502,6 +524,22 @@ NB_MODULE(_cuda_impl, m) {
         "opw_out"_a.noconvert(),
         "xdoppler_out"_a.noconvert(),
         "rc_fmas_out"_a.noconvert(),
+        "sound_speed_m_s"_a,
+        "sampling_freq_hz"_a,
+        "demod_freq_hz"_a,
+        "f_number"_a
+    );
+    m.def(
+        "dmas_ccf_acf_from_channels",
+        &dmas_ccf_acf_from_channels,
+        "iq_rc"_a.noconvert(),
+        "iq_cr"_a.noconvert(),
+        "scan_coords_m"_a.noconvert(),
+        "x_elements_m"_a.noconvert(),
+        "y_elements_m"_a.noconvert(),
+        "angles_rad"_a.noconvert(),
+        "t_start_s"_a.noconvert(),
+        "out"_a.noconvert(),
         "sound_speed_m_s"_a,
         "sampling_freq_hz"_a,
         "demod_freq_hz"_a,

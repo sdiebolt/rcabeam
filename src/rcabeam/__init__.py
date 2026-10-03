@@ -3,6 +3,7 @@
 from rcabeam.dmas import dmas_bruteforce, dmas_ccf_acf_core, dmas_ccf_acf_frame
 from rcabeam.fmas import rc_fmas, rc_fmas_pd, signed_sqrt
 from rcabeam.fused import (
+    dmas_ccf_acf_from_channels,
     fast_pd_from_channels,
     opw_pd_from_channels,
     rc_fmas_pd_from_channels,
@@ -22,6 +23,7 @@ __all__ = [
     "dmas_bruteforce",
     "dmas_ccf_acf_core",
     "dmas_ccf_acf_frame",
+    "dmas_ccf_acf_from_channels",
     "fast_pd_from_channels",
     "opw",
     "opw_numpy",
