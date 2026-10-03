@@ -153,7 +153,7 @@ def main() -> None:
     parser.add_argument("--frequency", type=float, default=15e6, help="Center frequency in Hz.")
     parser.add_argument("--pitch", type=float, default=0.1e-3, help="Element pitch in meters.")
     parser.add_argument("--quality", action="store_true", help="Use 160³ lambda/2-ish grid preset.")
-    parser.add_argument("--frames", type=int, default=1, help="Slow-time frames for ensemble OPW PD benchmark.")
+    parser.add_argument("--frames", type=int, default=200, help="Slow-time frames for ensemble OPW PD benchmark.")
     parser.add_argument("--include-reference", action="store_true", help="Also run slow NumPy reference timings with --full.")
     parser.add_argument("--full", action="store_true", help="Run staged, individual fused, St-SW, and DMAS timings.")
     args = parser.parse_args()

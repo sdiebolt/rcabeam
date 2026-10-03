@@ -23,7 +23,7 @@ uv run python examples/point_target.py
 
 ## Benchmark
 
-Default 15 MHz / 80+80 RCA / 16+16 plane waves / 80³ grid:
+Default 15 MHz / 80+80 RCA / 16+16 plane waves / 80³ grid / 200 slow-time frames:
 
 ```bash
 uv run python examples/benchmark.py
@@ -35,10 +35,10 @@ Smaller smoke benchmark:
 uv run python examples/benchmark.py --grid 32 --elements 16 --angles 4
 ```
 
-Ensemble OPW power Doppler benchmark:
+Single-frame method comparison:
 
 ```bash
-uv run python examples/benchmark.py --frames 32
+uv run python examples/benchmark.py --frames 1
 ```
 
 Full benchmark, including staged totals, St-SW, and DMAS:
