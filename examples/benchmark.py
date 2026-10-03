@@ -24,6 +24,7 @@ from rcabeam import (
     dmas_ccf_acf_from_channels,
     fast_pd_from_channels,
     opw,
+    opw_ensemble_pd_from_channels,
     opw_pd_from_channels,
     power_doppler,
     rc_fmas_pd,
@@ -97,7 +98,7 @@ def _delay_breakdown(
     }
 
 
-def _render_setup(n_voxels: int, n_elements: int, n_angles: int, n_grid: int, f0: float) -> None:
+def _render_setup(n_voxels: int, n_elements: int, n_angles: int, n_grid: int, f0: float, n_frames: int = 1) -> None:
     """Print benchmark setup."""
     table = Table(title="RCA benchmark setup")
     table.add_column("Parameter", style="bold")
@@ -106,6 +107,7 @@ def _render_setup(n_voxels: int, n_elements: int, n_angles: int, n_grid: int, f0
     table.add_row("Grid", f"{n_grid}³ = {n_voxels:,} voxels")
     table.add_row("RCA elements", f"{n_elements} row + {n_elements} column")
     table.add_row("Angles", f"{n_angles} RC + {n_angles} CR")
+    table.add_row("Slow-time frames", f"{n_frames}")
     console.print(table)
 
 
@@ -151,6 +153,7 @@ def main() -> None:
     parser.add_argument("--frequency", type=float, default=15e6, help="Center frequency in Hz.")
     parser.add_argument("--pitch", type=float, default=0.1e-3, help="Element pitch in meters.")
     parser.add_argument("--quality", action="store_true", help="Use 160³ lambda/2-ish grid preset.")
+    parser.add_argument("--frames", type=int, default=1, help="Slow-time frames for ensemble OPW PD benchmark.")
     parser.add_argument("--include-reference", action="store_true", help="Also run slow NumPy reference timings with --full.")
     parser.add_argument("--full", action="store_true", help="Run staged, individual fused, St-SW, and DMAS timings.")
     args = parser.parse_args()
@@ -178,13 +181,26 @@ def main() -> None:
     grid = (x, z, y)
     n_voxels = len(x) * len(z) * len(y)
 
-    _render_setup(n_voxels, n_elements, n_angles, n_grid, f0)
+    _render_setup(n_voxels, n_elements, n_angles, n_grid, f0, args.frames)
 
     rc_ch = sum(amp * simulate_point(geom, angles, point, nsamp, t_start, "RC") for point, amp in scatterers)
     cr_ch = sum(amp * simulate_point(geom, angles, point, nsamp, t_start, "CR") for point, amp in scatterers)
 
     timings: list[Timing] = []
     fast_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)  # warm CUDA context and allocator.
+    if args.frames > 1:
+        phase = np.exp(2j * np.pi * np.arange(args.frames, dtype=np.float32) / args.frames).astype(np.complex64)
+        rc_ens = np.ascontiguousarray(rc_ch[..., None] * phase)
+        cr_ens = np.ascontiguousarray(cr_ch[..., None] * phase)
+        _, timing = _time(
+            "Method",
+            "OPW ensemble PD fused channels",
+            lambda: opw_ensemble_pd_from_channels(rc_ens, cr_ens, angles, t_start, grid, geom),
+            repeat=3,
+            note=f"channel ensemble → PD ({args.frames} frames)",
+        )
+        timings.append(timing)
+
     for name, func, repeat, note in [
         ("OPW PD fused channels", lambda: opw_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom), 10, "channel → PD"),
         ("XDoppler PD fused channels", lambda: xdoppler_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom), 10, "channel → PD"),

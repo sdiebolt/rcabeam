@@ -10,6 +10,7 @@ from rcabeam import (
     dmas_ccf_acf_from_channels,
     fast_pd_from_channels,
     opw,
+    opw_ensemble_pd_from_channels,
     opw_numpy,
     opw_pd_from_channels,
     rc_fmas_pd,
@@ -67,6 +68,22 @@ def test_delay_rca_channels_cuda_matches_python_reference() -> None:
             rtol=1e-4,
             atol=1e-4,
         )
+
+
+def test_fused_opw_ensemble_pd_from_channels_matches_frame_mean_reference() -> None:
+    """Fused ensemble OPW path matches the mean of per-frame fused OPW."""
+    f0 = 6e6
+    el = (np.arange(8) - 7 / 2) * 0.2e-3
+    geom = RCAGeometry(x_el=el, y_el=el, fs=4 * f0, f_demod=f0)
+    angles = np.deg2rad(np.linspace(-4, 4, 3))
+    grid = (np.linspace(-0.4e-3, 0.4e-3, 3), np.linspace(11.8e-3, 12.2e-3, 3), np.linspace(-0.4e-3, 0.4e-3, 2))
+    rc0 = simulate_point(geom, angles, (0.0, 12e-3, 0.0), 320, 8e-6, "RC")
+    cr0 = simulate_point(geom, angles, (0.0, 12e-3, 0.0), 320, 8e-6, "CR")
+    scales = np.array([1.0, 0.5, 1.5], dtype=np.float32)
+    rc = np.ascontiguousarray(rc0[..., None] * scales)
+    cr = np.ascontiguousarray(cr0[..., None] * scales)
+    expected = np.mean([opw_pd_from_channels(rc[..., i], cr[..., i], angles, 8e-6, grid, geom) for i in range(len(scales))], axis=0)
+    np.testing.assert_allclose(opw_ensemble_pd_from_channels(rc, cr, angles, 8e-6, grid, geom), expected, rtol=1e-4, atol=1e-4)
 
 
 def test_fused_opw_pd_from_channels_matches_staged_reference() -> None:

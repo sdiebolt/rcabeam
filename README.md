@@ -35,6 +35,12 @@ Smaller smoke benchmark:
 uv run python examples/benchmark.py --grid 32 --elements 16 --angles 4
 ```
 
+Ensemble OPW power Doppler benchmark:
+
+```bash
+uv run python examples/benchmark.py --frames 32
+```
+
 Full benchmark, including staged totals, St-SW, and DMAS:
 
 ```bash
@@ -87,6 +93,7 @@ Implemented:
 - RCA delay-and-sum CUDA core and Python bindings.
 - OPW, XDoppler, RC-FMAS, St-SW, and DMAS-CCF-ACF references.
 - Fused channel-to-power CUDA paths for OPW, XDoppler, RC-FMAS, and DMAS-CCF-ACF.
+- Fused OPW slow-time ensemble channel-to-power CUDA path with frame-inner layout.
 - One-pass fused `fast_pd_from_channels` CUDA path for OPW, XDoppler, and RC-FMAS.
 - Dense matrix-array reference through `mach-beamform`.
 

@@ -5,6 +5,7 @@ from rcabeam.fmas import rc_fmas, rc_fmas_pd, signed_sqrt
 from rcabeam.fused import (
     dmas_ccf_acf_from_channels,
     fast_pd_from_channels,
+    opw_ensemble_pd_from_channels,
     opw_pd_from_channels,
     rc_fmas_pd_from_channels,
     xdoppler_pd_from_channels,
@@ -26,6 +27,7 @@ __all__ = [
     "dmas_ccf_acf_from_channels",
     "fast_pd_from_channels",
     "opw",
+    "opw_ensemble_pd_from_channels",
     "opw_numpy",
     "opw_pd_from_channels",
     "power_doppler",

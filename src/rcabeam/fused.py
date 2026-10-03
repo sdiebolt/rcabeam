@@ -59,6 +59,58 @@ def _run_fused_pd(
     return out.reshape((len(x), len(z), len(y)))
 
 
+def opw_ensemble_pd_from_channels(
+    iq_rc: np.ndarray,
+    iq_cr: np.ndarray,
+    angles: np.ndarray,
+    t_start: float | np.ndarray,
+    grid: tuple[np.ndarray, np.ndarray, np.ndarray],
+    geom: RCAGeometry,
+    *,
+    use_cuda: bool = True,
+) -> np.ndarray:
+    """Compute OPW power Doppler directly from a slow-time channel ensemble.
+
+    Parameters
+    ----------
+    iq_rc
+        RC channel IQ data with shape `(n_samples, n_channels, n_angles, n_frames)`.
+    iq_cr
+        CR channel IQ data with shape `(n_samples, n_channels, n_angles, n_frames)`.
+    angles
+        Plane-wave steering angles in radians.
+    t_start
+        First sample time, scalar or one value per angle.
+    grid
+        Coordinate vectors `(x, z, y)` in meters.
+    geom
+        RCA geometry.
+    use_cuda
+        Use fused CUDA implementation when available.
+
+    Returns
+    -------
+    np.ndarray
+        Mean OPW power Doppler volume with shape `(nx, nz, ny)`.
+    """
+    x, z, y = grid
+    if use_cuda:
+        try:
+            from rcabeam._cuda_impl import opw_ensemble_pd_from_channels as cuda_opw_ensemble_pd_from_channels
+        except ImportError:
+            pass
+        else:
+            args = _fused_args(iq_rc, iq_cr, angles, t_start, grid, geom)
+            out = np.empty(args[2].shape[0], dtype=np.float32)
+            cuda_opw_ensemble_pd_from_channels(*args[:7], out, *args[7:])
+            return out.reshape((len(x), len(z), len(y)))
+
+    frames = []
+    for frame in range(iq_rc.shape[-1]):
+        frames.append(opw_pd_from_channels(iq_rc[..., frame], iq_cr[..., frame], angles, t_start, grid, geom, use_cuda=False))
+    return np.mean(frames, axis=0)
+
+
 def fast_pd_from_channels(
     iq_rc: np.ndarray,
     iq_cr: np.ndarray,
