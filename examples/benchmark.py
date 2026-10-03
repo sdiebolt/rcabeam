@@ -21,6 +21,7 @@ from rcabeam import (
     delay_rca_channel_data,
     delay_rca_channels,
     dmas_ccf_acf_frame,
+    fast_pd_from_channels,
     opw,
     opw_pd_from_channels,
     power_doppler,
@@ -215,6 +216,7 @@ def main() -> None:
 
     staged_delay_ms = timings[0].best_ms + timings[1].best_ms
     for name, func, repeat, note in [
+        ("OPW+XDoppler+RC-FMAS fused", lambda: fast_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom), 10, "channel → 3 PD volumes"),
         ("OPW PD staged", lambda: power_doppler(opw(iq)), 10, f"+ delay ≈ {staged_delay_ms:.1f} ms"),
         ("OPW PD fused channels", lambda: opw_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom), 10, "channel → PD"),
         ("XDoppler PD staged", lambda: xdoppler_pd(iq, rc_idx, cr_idx), 10, f"+ delay ≈ {staged_delay_ms:.1f} ms"),

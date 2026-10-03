@@ -21,15 +21,13 @@ from rcabeam import (
     RCAGeometry,
     delay_rca_channels,
     dmas_ccf_acf_frame,
+    fast_pd_from_channels,
     opw,
-    opw_pd_from_channels,
     power_doppler,
     rc_fmas_pd,
-    rc_fmas_pd_from_channels,
     simulate_point,
     st_sw_pd,
     xdoppler_pd,
-    xdoppler_pd_from_channels,
 )
 
 DISPLAY_FLOOR_DB = -40
@@ -83,9 +81,7 @@ def main() -> None:
     cr_ch = sum(amp * simulate_point(geom, angles, point, nsamp, t_start, "CR") for point, amp in scatterers)
     grid = (x, z, y)
     if args.fast:
-        opw_volume = opw_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)
-        xdoppler_volume = xdoppler_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)
-        fmas_volume = rc_fmas_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)
+        opw_volume, xdoppler_volume, fmas_volume = fast_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)
         stsw_volume = None
         dmas_volume = None
         print("computed fast RCA volumes: fused OPW, fused XDoppler, fused RC-FMAS")

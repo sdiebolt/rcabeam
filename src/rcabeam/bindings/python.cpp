@@ -362,6 +362,62 @@ void fused_pd_from_channels(
     if (out.device_type() == nb::device::cpu::value) check_cuda(cudaMemcpy(out.data(), d_out, out.nbytes(), cudaMemcpyDeviceToHost));
 }
 
+void fast_pd_from_channels(
+    nb::ndarray<const std::complex<float>, nb::ndim<3>, nb::c_contig> iq_rc,
+    nb::ndarray<const std::complex<float>, nb::ndim<3>, nb::c_contig> iq_cr,
+    nb::ndarray<const float, nb::shape<-1, 3>, nb::c_contig> scan_coords_m,
+    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> x_elements_m,
+    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> y_elements_m,
+    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> angles_rad,
+    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> t_start_s,
+    nb::ndarray<float, nb::ndim<1>, nb::c_contig> opw_out,
+    nb::ndarray<float, nb::ndim<1>, nb::c_contig> xdoppler_out,
+    nb::ndarray<float, nb::ndim<1>, nb::c_contig> rc_fmas_out,
+    float sound_speed_m_s,
+    float sampling_freq_hz,
+    float demod_freq_hz,
+    float f_number
+) {
+    size_t n_samples = iq_rc.shape(0);
+    size_t n_channels = iq_rc.shape(1);
+    size_t n_angles = iq_rc.shape(2);
+    size_t n_voxels = scan_coords_m.shape(0);
+    if (iq_cr.shape(0) != n_samples || iq_cr.shape(1) != n_channels || iq_cr.shape(2) != n_angles) throw std::invalid_argument("RC and CR data shapes must match");
+    if (x_elements_m.shape(0) != n_channels || y_elements_m.shape(0) != n_channels || angles_rad.shape(0) != n_angles || t_start_s.shape(0) != n_angles) throw std::invalid_argument("geometry shapes must match channel data");
+    if (opw_out.shape(0) != n_voxels || xdoppler_out.shape(0) != n_voxels || rc_fmas_out.shape(0) != n_voxels) throw std::invalid_argument("outputs must have shape (n_voxels,)");
+
+    DeviceBuffer<std::complex<float>> owned_rc(iq_rc.device_type() == nb::device::cpu::value ? iq_rc.nbytes() : 1);
+    DeviceBuffer<std::complex<float>> owned_cr(iq_cr.device_type() == nb::device::cpu::value ? iq_cr.nbytes() : 1);
+    DeviceBuffer<float> owned_scan(scan_coords_m.device_type() == nb::device::cpu::value ? scan_coords_m.nbytes() : 1);
+    DeviceBuffer<float> owned_x(x_elements_m.device_type() == nb::device::cpu::value ? x_elements_m.nbytes() : 1);
+    DeviceBuffer<float> owned_y(y_elements_m.device_type() == nb::device::cpu::value ? y_elements_m.nbytes() : 1);
+    DeviceBuffer<float> owned_angles(angles_rad.device_type() == nb::device::cpu::value ? angles_rad.nbytes() : 1);
+    DeviceBuffer<float> owned_tstart(t_start_s.device_type() == nb::device::cpu::value ? t_start_s.nbytes() : 1);
+    DeviceBuffer<float> owned_opw(opw_out.device_type() == nb::device::cpu::value ? opw_out.nbytes() : 1);
+    DeviceBuffer<float> owned_xdoppler(xdoppler_out.device_type() == nb::device::cpu::value ? xdoppler_out.nbytes() : 1);
+    DeviceBuffer<float> owned_fmas(rc_fmas_out.device_type() == nb::device::cpu::value ? rc_fmas_out.nbytes() : 1);
+
+    const void* d_rc = device_input(iq_rc, owned_rc);
+    const void* d_cr = device_input(iq_cr, owned_cr);
+    const float* d_scan = device_input(scan_coords_m, owned_scan);
+    const float* d_x = device_input(x_elements_m, owned_x);
+    const float* d_y = device_input(y_elements_m, owned_y);
+    const float* d_angles = device_input(angles_rad, owned_angles);
+    const float* d_tstart = device_input(t_start_s, owned_tstart);
+    float* d_opw = opw_out.device_type() == nb::device::cpu::value ? owned_opw.ptr : opw_out.data();
+    float* d_xdoppler = xdoppler_out.device_type() == nb::device::cpu::value ? owned_xdoppler.ptr : xdoppler_out.data();
+    float* d_fmas = rc_fmas_out.device_type() == nb::device::cpu::value ? owned_fmas.ptr : rc_fmas_out.data();
+
+    check_status(rcabeam_fast_pd_from_channels_device(
+        d_rc, d_cr, d_scan, d_x, d_y, d_angles, d_tstart, d_opw, d_xdoppler, d_fmas,
+        n_samples, n_channels, n_angles, n_voxels, sound_speed_m_s, sampling_freq_hz, demod_freq_hz, f_number
+    ));
+    check_cuda(cudaDeviceSynchronize());
+    if (opw_out.device_type() == nb::device::cpu::value) check_cuda(cudaMemcpy(opw_out.data(), d_opw, opw_out.nbytes(), cudaMemcpyDeviceToHost));
+    if (xdoppler_out.device_type() == nb::device::cpu::value) check_cuda(cudaMemcpy(xdoppler_out.data(), d_xdoppler, xdoppler_out.nbytes(), cudaMemcpyDeviceToHost));
+    if (rc_fmas_out.device_type() == nb::device::cpu::value) check_cuda(cudaMemcpy(rc_fmas_out.data(), d_fmas, rc_fmas_out.nbytes(), cudaMemcpyDeviceToHost));
+}
+
 void opw_pd_from_channels(
     nb::ndarray<const std::complex<float>, nb::ndim<3>, nb::c_contig> iq_rc,
     nb::ndarray<const std::complex<float>, nb::ndim<3>, nb::c_contig> iq_cr,
@@ -428,6 +484,24 @@ NB_MODULE(_cuda_impl, m) {
         "t_start_s"_a.noconvert(),
         "out"_a.noconvert(),
         "config"_a,
+        "sound_speed_m_s"_a,
+        "sampling_freq_hz"_a,
+        "demod_freq_hz"_a,
+        "f_number"_a
+    );
+    m.def(
+        "fast_pd_from_channels",
+        &fast_pd_from_channels,
+        "iq_rc"_a.noconvert(),
+        "iq_cr"_a.noconvert(),
+        "scan_coords_m"_a.noconvert(),
+        "x_elements_m"_a.noconvert(),
+        "y_elements_m"_a.noconvert(),
+        "angles_rad"_a.noconvert(),
+        "t_start_s"_a.noconvert(),
+        "opw_out"_a.noconvert(),
+        "xdoppler_out"_a.noconvert(),
+        "rc_fmas_out"_a.noconvert(),
         "sound_speed_m_s"_a,
         "sampling_freq_hz"_a,
         "demod_freq_hz"_a,

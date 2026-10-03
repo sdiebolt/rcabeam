@@ -75,10 +75,12 @@ Implemented:
 - RCA delay-and-sum CUDA core and Python bindings.
 - OPW, XDoppler, RC-FMAS, St-SW, and DMAS-CCF-ACF references.
 - Fused channel-to-power CUDA paths for OPW, XDoppler, and RC-FMAS.
+- One-pass fused `fast_pd_from_channels` CUDA path for all three fast RCA outputs.
 - Dense matrix-array reference through `mach-beamform`.
 
 Still experimental:
 
 - CUDA kernels are correctness-first, not final real-time kernels.
+- ffdas-style batch-inner tiling/tensor-core approaches are not implemented yet.
 - St-SW and DMAS paths are not fused/fully optimized.
 - Dense matrix reference is for comparison, not part of RCA core.

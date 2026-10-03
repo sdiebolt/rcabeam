@@ -141,6 +141,27 @@ rcabeam_status rcabeam_rc_fmas_pd_from_channels_device(
     float f_number
 );
 
+rcabeam_status rcabeam_fast_pd_from_channels_device(
+    const void* iq_rc,
+    const void* iq_cr,
+    const float* scan_coords_m,
+    const float* x_elements_m,
+    const float* y_elements_m,
+    const float* angles_rad,
+    const float* t_start_s,
+    float* opw_out,
+    float* xdoppler_out,
+    float* rc_fmas_out,
+    size_t n_samples,
+    size_t n_channels,
+    size_t n_angles,
+    size_t n_voxels,
+    float sound_speed_m_s,
+    float sampling_freq_hz,
+    float demod_freq_hz,
+    float f_number
+);
+
 #ifdef __cplusplus
 }
 #endif

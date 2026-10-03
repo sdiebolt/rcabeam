@@ -6,6 +6,7 @@ from rcabeam import (
     RCAGeometry,
     delay_rca_channel_data,
     delay_rca_channels,
+    fast_pd_from_channels,
     opw,
     opw_numpy,
     opw_pd_from_channels,
@@ -116,6 +117,22 @@ def test_fused_rc_fmas_pd_from_channels_matches_staged_reference() -> None:
     cr_idx = np.arange(len(angles), 2 * len(angles))
     expected = rc_fmas_pd(np.concatenate([rc_vol, cr_vol], axis=-1)[..., None], rc_idx, cr_idx, use_cuda=False)
     np.testing.assert_allclose(rc_fmas_pd_from_channels(rc, cr, angles, 8e-6, grid, geom), expected, rtol=1e-4, atol=1e-4)
+
+
+def test_fast_pd_from_channels_matches_individual_fused_paths() -> None:
+    """One-pass fused fast path matches the individual fused channel paths."""
+    f0 = 6e6
+    el = (np.arange(10) - 9 / 2) * 0.2e-3
+    geom = RCAGeometry(x_el=el, y_el=el, fs=4 * f0, f_demod=f0)
+    angles = np.deg2rad(np.linspace(-4, 4, 3))
+    grid = (np.linspace(-0.4e-3, 0.4e-3, 3), np.linspace(11.8e-3, 12.2e-3, 4), np.linspace(-0.4e-3, 0.4e-3, 3))
+    point = (0.0, 12e-3, 0.0)
+    rc = simulate_point(geom, angles, point, 320, 8e-6, "RC")
+    cr = simulate_point(geom, angles, point, 320, 8e-6, "CR")
+    opw_got, xd_got, fmas_got = fast_pd_from_channels(rc, cr, angles, 8e-6, grid, geom)
+    np.testing.assert_allclose(opw_got, opw_pd_from_channels(rc, cr, angles, 8e-6, grid, geom), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(xd_got, xdoppler_pd_from_channels(rc, cr, angles, 8e-6, grid, geom), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(fmas_got, rc_fmas_pd_from_channels(rc, cr, angles, 8e-6, grid, geom), rtol=1e-4, atol=1e-4)
 
 
 def test_delay_rca_channel_data_cuda_matches_python_reference() -> None:
