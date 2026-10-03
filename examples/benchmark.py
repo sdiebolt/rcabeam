@@ -150,6 +150,8 @@ def main() -> None:
     parser.add_argument("--frequency", type=float, default=15e6, help="Center frequency in Hz.")
     parser.add_argument("--pitch", type=float, default=0.1e-3, help="Element pitch in meters.")
     parser.add_argument("--quality", action="store_true", help="Use 160³ lambda/2-ish grid preset.")
+    parser.add_argument("--include-reference", action="store_true", help="Also run slow NumPy reference timings.")
+    parser.add_argument("--only-fast", action="store_true", help="Only time the one-pass fused fast RCA path.")
     args = parser.parse_args()
 
     f0 = args.frequency
@@ -180,67 +182,93 @@ def main() -> None:
     rc_ch = sum(amp * simulate_point(geom, angles, point, nsamp, t_start, "RC") for point, amp in scatterers)
     cr_ch = sum(amp * simulate_point(geom, angles, point, nsamp, t_start, "CR") for point, amp in scatterers)
 
-    delay_rca_channels(rc_ch, angles, t_start, grid, geom, "RC")  # warm CUDA context and allocator.
+    timings: list[Timing] = []
+    fast_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)  # warm CUDA context and allocator.
+    if args.only_fast:
+        _, timing = _time(
+            "Method",
+            "OPW+XDoppler+RC-FMAS fused",
+            lambda: fast_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom),
+            repeat=10,
+            note="channel → 3 PD volumes",
+        )
+        timings.append(timing)
+        _render_timings(timings)
+        return
+
     _render_breakdowns([
         ("RC", _delay_breakdown(rc_ch, angles, t_start, grid, geom, "RC")),
         ("CR", _delay_breakdown(cr_ch, angles, t_start, grid, geom, "CR")),
     ])
-
-    timings: list[Timing] = []
     rc, timing = _time("Delay", "RC per-angle CUDA", lambda: delay_rca_channels(rc_ch, angles, t_start, grid, geom, "RC"), repeat=5)
     timings.append(timing)
     cr, timing = _time("Delay", "CR per-angle CUDA", lambda: delay_rca_channels(cr_ch, angles, t_start, grid, geom, "CR"), repeat=5)
     timings.append(timing)
-    _, timing = _time(
-        "Delay",
-        "RC per-angle NumPy",
-        lambda: delay_rca_channels(rc_ch, angles, t_start, grid, geom, "RC", use_cuda=False),
-        repeat=1,
-        note="reference only",
-    )
-    timings.append(timing)
+    if args.include_reference:
+        _, timing = _time(
+            "Delay",
+            "RC per-angle NumPy",
+            lambda: delay_rca_channels(rc_ch, angles, t_start, grid, geom, "RC", use_cuda=False),
+            repeat=1,
+            note="reference only",
+        )
+        timings.append(timing)
     _, timing = _time("Delay", "RC channel-data CUDA", lambda: delay_rca_channel_data(rc_ch, angles, t_start, grid, geom, "RC"), repeat=5)
     timings.append(timing)
-    _, timing = _time(
-        "Delay",
-        "RC channel-data NumPy",
-        lambda: delay_rca_channel_data(rc_ch, angles, t_start, grid, geom, "RC", use_cuda=False),
-        repeat=1,
-        note="reference only",
-    )
-    timings.append(timing)
+    if args.include_reference:
+        _, timing = _time(
+            "Delay",
+            "RC channel-data NumPy",
+            lambda: delay_rca_channel_data(rc_ch, angles, t_start, grid, geom, "RC", use_cuda=False),
+            repeat=1,
+            note="reference only",
+        )
+        timings.append(timing)
 
     iq = np.concatenate([rc, cr], axis=-1)[..., None]
     rc_idx = np.arange(len(angles))
     cr_idx = np.arange(len(angles), 2 * len(angles))
 
     staged_delay_ms = timings[0].best_ms + timings[1].best_ms
-    for name, func, repeat, note in [
-        ("OPW+XDoppler+RC-FMAS fused", lambda: fast_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom), 10, "channel → 3 PD volumes"),
-        ("OPW PD staged", lambda: power_doppler(opw(iq)), 10, f"+ delay ≈ {staged_delay_ms:.1f} ms"),
-        ("OPW PD fused channels", lambda: opw_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom), 10, "channel → PD"),
-        ("XDoppler PD staged", lambda: xdoppler_pd(iq, rc_idx, cr_idx), 10, f"+ delay ≈ {staged_delay_ms:.1f} ms"),
-        (
-            "XDoppler PD fused channels",
-            lambda: xdoppler_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom),
-            10,
-            "channel → PD",
-        ),
-        ("RC-FMAS PD staged", lambda: rc_fmas_pd(iq, rc_idx, cr_idx), 10, f"+ delay ≈ {staged_delay_ms:.1f} ms"),
-        ("RC-FMAS PD fused channels", lambda: rc_fmas_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom), 10, "channel → PD"),
-        ("St-SW PD", lambda: st_sw_pd(iq, rc_idx, cr_idx, k=2), 3, f"+ delay ≈ {staged_delay_ms:.1f} ms"),
-        (
-            "DMAS-CCF-ACF frame",
-            lambda: dmas_ccf_acf_frame(rc_ch, cr_ch, angles, angles, t_start, t_start, grid, geom),
-            3,
-            "includes channel-data delay",
-        ),
+    _, timing = _time(
+        "Method",
+        "OPW+XDoppler+RC-FMAS fused",
+        lambda: fast_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom),
+        repeat=10,
+        note="channel → 3 PD volumes",
+    )
+    timings.append(timing)
+
+    staged_methods = [
+        ("OPW", lambda: power_doppler(opw(iq)), 10),
+        ("XDoppler", lambda: xdoppler_pd(iq, rc_idx, cr_idx), 10),
+        ("RC-FMAS", lambda: rc_fmas_pd(iq, rc_idx, cr_idx), 10),
+        ("St-SW", lambda: st_sw_pd(iq, rc_idx, cr_idx, k=2), 3),
+    ]
+    for name, func, repeat in staged_methods:
+        _, timing = _time("Method", f"{name} PD staged post", func, repeat=repeat, note="post-delay only")
+        timings.append(timing)
+        timings.append(Timing("Total", f"{name} staged total", staged_delay_ms + timing.best_ms, "delay + post"))
+
+    for name, func in [
+        ("OPW PD fused channels", lambda: opw_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)),
+        ("XDoppler PD fused channels", lambda: xdoppler_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)),
+        ("RC-FMAS PD fused channels", lambda: rc_fmas_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)),
     ]:
-        _, timing = _time("Method", name, func, repeat=repeat, note=note)
+        _, timing = _time("Method", name, func, repeat=10, note="channel → PD")
         timings.append(timing)
 
+    _, timing = _time(
+        "Method",
+        "DMAS-CCF-ACF frame",
+        lambda: dmas_ccf_acf_frame(rc_ch, cr_ch, angles, angles, t_start, t_start, grid, geom),
+        repeat=3,
+        note="includes channel-data delay",
+    )
+    timings.append(timing)
+
     _render_timings(timings)
-    console.print("[bold]Fusion plan:[/bold] OPW, XDoppler, and RC-FMAS channel→PD paths are fused. Next fuse only St-SW/DMAS if profiling justifies it.")
+    console.print("[bold]Fusion plan:[/bold] fast OPW/XDoppler/RC-FMAS is realtime candidate; DMAS needs a dedicated algorithmic kernel, not just wrapper fusion.")
 
 
 if __name__ == "__main__":
