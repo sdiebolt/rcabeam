@@ -35,16 +35,16 @@ Smaller smoke benchmark:
 uv run python examples/benchmark.py --grid 32 --elements 16 --angles 4
 ```
 
-Fast-path-only benchmark for profiling:
+Full benchmark, including staged totals, St-SW, and DMAS:
 
 ```bash
-uv run python examples/benchmark.py --only-fast
+uv run python examples/benchmark.py --full
 ```
 
-Slow NumPy reference timings are opt-in:
+Slow NumPy reference timings are opt-in with the full benchmark:
 
 ```bash
-uv run python examples/benchmark.py --include-reference
+uv run python examples/benchmark.py --full --include-reference
 ```
 
 Quality-ish grid preset:

@@ -150,8 +150,8 @@ def main() -> None:
     parser.add_argument("--frequency", type=float, default=15e6, help="Center frequency in Hz.")
     parser.add_argument("--pitch", type=float, default=0.1e-3, help="Element pitch in meters.")
     parser.add_argument("--quality", action="store_true", help="Use 160³ lambda/2-ish grid preset.")
-    parser.add_argument("--include-reference", action="store_true", help="Also run slow NumPy reference timings.")
-    parser.add_argument("--only-fast", action="store_true", help="Only time the one-pass fused fast RCA path.")
+    parser.add_argument("--include-reference", action="store_true", help="Also run slow NumPy reference timings with --full.")
+    parser.add_argument("--full", action="store_true", help="Run staged, individual fused, St-SW, and DMAS timings.")
     args = parser.parse_args()
 
     f0 = args.frequency
@@ -184,15 +184,15 @@ def main() -> None:
 
     timings: list[Timing] = []
     fast_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)  # warm CUDA context and allocator.
-    if args.only_fast:
-        _, timing = _time(
-            "Method",
-            "OPW+XDoppler+RC-FMAS fused",
-            lambda: fast_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom),
-            repeat=10,
-            note="channel → 3 PD volumes",
-        )
-        timings.append(timing)
+    _, timing = _time(
+        "Method",
+        "OPW+XDoppler+RC-FMAS fused",
+        lambda: fast_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom),
+        repeat=10,
+        note="channel → 3 PD volumes",
+    )
+    timings.append(timing)
+    if not args.full:
         _render_timings(timings)
         return
 
@@ -230,15 +230,6 @@ def main() -> None:
     cr_idx = np.arange(len(angles), 2 * len(angles))
 
     staged_delay_ms = timings[0].best_ms + timings[1].best_ms
-    _, timing = _time(
-        "Method",
-        "OPW+XDoppler+RC-FMAS fused",
-        lambda: fast_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom),
-        repeat=10,
-        note="channel → 3 PD volumes",
-    )
-    timings.append(timing)
-
     staged_methods = [
         ("OPW", lambda: power_doppler(opw(iq)), 10),
         ("XDoppler", lambda: xdoppler_pd(iq, rc_idx, cr_idx), 10),
