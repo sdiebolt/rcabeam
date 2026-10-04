@@ -18,13 +18,14 @@ from rich.table import Table
 
 from rcabeam import (
     RCAGeometry,
+    beamform_ensemble,
     delay_rca_channel_data,
     delay_rca_channels,
     dmas_ccf_acf_frame,
     dmas_ccf_acf_from_channels,
+    ensemble_pd_from_channels,
     fast_pd_from_channels,
     opw,
-    opw_ensemble_pd_from_channels,
     opw_pd_from_channels,
     power_doppler,
     rc_fmas_pd,
@@ -153,10 +154,32 @@ def main() -> None:
     parser.add_argument("--frequency", type=float, default=15e6, help="Center frequency in Hz.")
     parser.add_argument("--pitch", type=float, default=0.1e-3, help="Element pitch in meters.")
     parser.add_argument("--quality", action="store_true", help="Use 160³ lambda/2-ish grid preset.")
-    parser.add_argument("--frames", type=int, default=200, help="Slow-time frames for ensemble OPW PD benchmark.")
-    parser.add_argument("--include-reference", action="store_true", help="Also run slow NumPy reference timings with --full.")
+    parser.add_argument("--frames", type=int, default=200, help="Slow-time frames for every ensemble beamformer.")
+    parser.add_argument(
+        "--method",
+        choices=["all", "opw", "xdoppler", "rc_fmas", "dmas", "st_sw"],
+        default="all",
+        help="Select an ensemble method for profiling.",
+    )
+    parser.add_argument(
+        "--compare-baseline", action="store_true", help="Also measure the original OPW ensemble kernel."
+    )
+    parser.add_argument(
+        "--iq",
+        action="store_true",
+        help="Export slow-time complex signals for OPW/XDoppler/RC-FMAS instead of reducing.",
+    )
+    parser.add_argument(
+        "--include-reference", action="store_true", help="Also run slow NumPy reference timings with --full."
+    )
     parser.add_argument("--full", action="store_true", help="Run staged, individual fused, St-SW, and DMAS timings.")
     args = parser.parse_args()
+    if args.include_reference and not args.full:
+        parser.error("--include-reference requires --full")
+    if args.iq and (args.method in ("dmas", "st_sw") or args.compare_baseline):
+        parser.error("--iq supports OPW/XDoppler/RC-FMAS only; --compare-baseline requires power reduction")
+    if min(args.grid, args.elements, args.frames) < 1 or args.angles < 2:
+        parser.error("grid, elements and frames must be positive; angles must be at least 2")
 
     f0 = args.frequency
     pitch = args.pitch
@@ -187,40 +210,73 @@ def main() -> None:
     cr_ch = sum(amp * simulate_point(geom, angles, point, nsamp, t_start, "CR") for point, amp in scatterers)
 
     timings: list[Timing] = []
-    fast_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)  # warm CUDA context and allocator.
-    if args.frames > 1:
-        phase = np.exp(2j * np.pi * np.arange(args.frames, dtype=np.float32) / args.frames).astype(np.complex64)
-        rc_ens = np.ascontiguousarray(rc_ch[..., None] * phase)
-        cr_ens = np.ascontiguousarray(cr_ch[..., None] * phase)
+    phase = np.exp(2j * np.pi * np.arange(args.frames, dtype=np.float32) / args.frames).astype(np.complex64)
+    rc_ens = np.ascontiguousarray(rc_ch[..., None] * phase)
+    cr_ens = np.ascontiguousarray(cr_ch[..., None] * phase)
+    methods = ["opw", "xdoppler", "rc_fmas", "dmas", "st_sw"] if args.method == "all" else [args.method]
+    if args.iq:
+        methods = [method for method in methods if method in ("opw", "xdoppler", "rc_fmas")]
+    reconstruct = beamform_ensemble if args.iq else ensemble_pd_from_channels
+    console.print("Timings include allocations, H2D, packing, reconstruction/reduction, and D2H; no clutter filtering.")
+    if args.iq:
+        console.print("Only OPW is conventional IQ; XDoppler/RC-FMAS export nonlinear complex signals.")
+    for method in methods:
+        reconstruct(rc_ens, cr_ens, angles, t_start, grid, geom, method=method)
         _, timing = _time(
-            "Method",
-            "OPW ensemble PD fused channels",
-            lambda: opw_ensemble_pd_from_channels(rc_ens, cr_ens, angles, t_start, grid, geom),
+            "Ensemble",
+            method,
+            lambda method=method: reconstruct(rc_ens, cr_ens, angles, t_start, grid, geom, method=method),
             repeat=3,
-            note=f"channel ensemble → PD ({args.frames} frames)",
+            note=f"{args.frames} frames → {'complex signal' if args.iq else 'unfiltered volume'}",
         )
         timings.append(timing)
+    if args.compare_baseline:
+        from rcabeam._cuda_impl import opw_ensemble_pd_from_channels as baseline
 
-    for name, func, repeat, note in [
-        ("OPW PD fused channels", lambda: opw_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom), 10, "channel → PD"),
-        ("XDoppler PD fused channels", lambda: xdoppler_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom), 10, "channel → PD"),
-        ("RC-FMAS PD fused channels", lambda: rc_fmas_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom), 10, "channel → PD"),
-        ("DMAS-CCF-ACF fused channels", lambda: dmas_ccf_acf_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom), 3, "channel → DMAS-CCF-ACF"),
-    ]:
-        _, timing = _time("Method", name, func, repeat=repeat, note=note)
+        scan = _scan_coords(grid)
+        el32 = np.ascontiguousarray(elements, dtype=np.float32)
+        theta32 = np.ascontiguousarray(angles, dtype=np.float32)
+        starts = np.full(len(angles), t_start, dtype=np.float32)
+        output = np.empty(n_voxels, dtype=np.float32)
+        _, timing = _time(
+            "Baseline",
+            "OPW original ensemble",
+            lambda: baseline(
+                rc_ens, cr_ens, scan, el32, el32, theta32, starts, output, geom.c, geom.fs, geom.f_demod, geom.fnumber
+            ),
+            repeat=3,
+            note="original per-frame geometry",
+        )
         timings.append(timing)
     if not args.full:
         _render_timings(timings)
         return
+    console.print("Additional --full rows below use ONE frame, not the full ensemble.")
+    for name, func in [
+        ("OPW", lambda: opw_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)),
+        ("XDoppler", lambda: xdoppler_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)),
+        ("RC-FMAS", lambda: rc_fmas_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)),
+        ("DMAS", lambda: dmas_ccf_acf_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)),
+    ]:
+        _, timing = _time("Single", name, func, repeat=3, note="1 frame")
+        timings.append(timing)
 
-    _render_breakdowns([
-        ("RC", _delay_breakdown(rc_ch, angles, t_start, grid, geom, "RC")),
-        ("CR", _delay_breakdown(cr_ch, angles, t_start, grid, geom, "CR")),
-    ])
-    rc, timing = _time("Delay", "RC per-angle CUDA", lambda: delay_rca_channels(rc_ch, angles, t_start, grid, geom, "RC"), repeat=5)
+    _render_breakdowns(
+        [
+            ("RC", _delay_breakdown(rc_ch, angles, t_start, grid, geom, "RC")),
+            ("CR", _delay_breakdown(cr_ch, angles, t_start, grid, geom, "CR")),
+        ]
+    )
+    rc, timing = _time(
+        "Delay", "RC per-angle CUDA", lambda: delay_rca_channels(rc_ch, angles, t_start, grid, geom, "RC"), repeat=5
+    )
     timings.append(timing)
-    cr, timing = _time("Delay", "CR per-angle CUDA", lambda: delay_rca_channels(cr_ch, angles, t_start, grid, geom, "CR"), repeat=5)
+    rc_delay_ms = timing.best_ms
+    cr, timing = _time(
+        "Delay", "CR per-angle CUDA", lambda: delay_rca_channels(cr_ch, angles, t_start, grid, geom, "CR"), repeat=5
+    )
     timings.append(timing)
+    staged_delay_ms = rc_delay_ms + timing.best_ms
     if args.include_reference:
         _, timing = _time(
             "Delay",
@@ -230,7 +286,12 @@ def main() -> None:
             note="reference only",
         )
         timings.append(timing)
-    _, timing = _time("Delay", "RC channel-data CUDA", lambda: delay_rca_channel_data(rc_ch, angles, t_start, grid, geom, "RC"), repeat=5)
+    _, timing = _time(
+        "Delay",
+        "RC channel-data CUDA",
+        lambda: delay_rca_channel_data(rc_ch, angles, t_start, grid, geom, "RC"),
+        repeat=5,
+    )
     timings.append(timing)
     if args.include_reference:
         _, timing = _time(
@@ -246,7 +307,6 @@ def main() -> None:
     rc_idx = np.arange(len(angles))
     cr_idx = np.arange(len(angles), 2 * len(angles))
 
-    staged_delay_ms = timings[0].best_ms + timings[1].best_ms
     staged_methods = [
         ("OPW", lambda: power_doppler(opw(iq)), 10),
         ("XDoppler", lambda: xdoppler_pd(iq, rc_idx, cr_idx), 10),
@@ -256,7 +316,9 @@ def main() -> None:
     for name, func, repeat in staged_methods:
         _, timing = _time("Method", f"{name} PD staged post", func, repeat=repeat, note="post-delay only")
         timings.append(timing)
-        timings.append(Timing("Total", f"{name} staged total", staged_delay_ms + timing.best_ms, "delay + post"))
+        timings.append(
+            Timing("Total", f"{name} staged total", staged_delay_ms + timing.best_ms, "estimated delay + post; 1 frame")
+        )
 
     _, timing = _time(
         "Method",
@@ -277,7 +339,7 @@ def main() -> None:
     timings.append(timing)
 
     _render_timings(timings)
-    console.print("[bold]Fusion plan:[/bold] OPW/XDoppler/RC-FMAS and DMAS-CCF-ACF now have fused channel paths; next optimize memory coalescing if profiling justifies it.")
+    console.print("All ensemble rows use frame-batched CUDA; additional --full rows are single-frame diagnostics.")
 
 
 if __name__ == "__main__":

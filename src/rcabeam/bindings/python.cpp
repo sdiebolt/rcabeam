@@ -540,8 +540,64 @@ void rc_fmas_pd_from_channels(
     fused_pd_from_channels(iq_rc, iq_cr, scan_coords_m, x_elements_m, y_elements_m, angles_rad, t_start_s, out, sound_speed_m_s, sampling_freq_hz, demod_freq_hz, f_number, 2);
 }
 
+void ensemble_from_channels(
+    nb::ndarray<const std::complex<float>, nb::ndim<4>, nb::c_contig> rc,
+    nb::ndarray<const std::complex<float>, nb::ndim<4>, nb::c_contig> cr,
+    nb::ndarray<const float, nb::shape<-1, 3>, nb::c_contig> scan,
+    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> xe,
+    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> ye,
+    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> angles,
+    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> starts,
+    nb::ndarray<float, nb::shape<-1, 2>, nb::c_contig> pd,
+    nb::ndarray<std::complex<float>, nb::ndim<2>, nb::c_contig> signal,
+    nb::ndarray<float, nb::ndim<1>, nb::c_contig> weights,
+    float c, float fs, float fd, float fn, int method, int k
+) {
+    size_t ns=rc.shape(0), nc=rc.shape(1), na=rc.shape(2), nt=rc.shape(3), nv=scan.shape(0);
+    for (size_t axis=0; axis<4; ++axis) if (rc.shape(axis) != cr.shape(axis)) throw std::invalid_argument("RC/CR ensemble shapes must match");
+    if (ns<2 || !nc || !na || !nt || !nv || method<0 || method>4) throw std::invalid_argument("invalid ensemble dimensions or method");
+    if (xe.shape(0)!=nc || ye.shape(0)!=nc || angles.shape(0)!=na || starts.shape(0)!=na) throw std::invalid_argument("geometry must match channel data");
+    if (pd.shape(0)!=nv || weights.shape(0)!=nv || signal.shape(1)!=nt || (signal.shape(0)!=0 && signal.shape(0)!=nv)) throw std::invalid_argument("invalid ensemble output shapes");
+    if (method==4 && (k<2 || k>4 || na<static_cast<size_t>(k))) throw std::invalid_argument("St-SW needs 2<=k<=4 and at least k angles");
+    DeviceBuffer<std::complex<float>> owned_rc(rc.device_type()==nb::device::cpu::value ? rc.nbytes():1);
+    DeviceBuffer<std::complex<float>> owned_cr(cr.device_type()==nb::device::cpu::value ? cr.nbytes():1);
+    DeviceBuffer<float> owned_scan(scan.device_type()==nb::device::cpu::value ? scan.nbytes():1);
+    DeviceBuffer<float> owned_x(xe.device_type()==nb::device::cpu::value ? xe.nbytes():1);
+    DeviceBuffer<float> owned_y(ye.device_type()==nb::device::cpu::value ? ye.nbytes():1);
+    DeviceBuffer<float> owned_angles(angles.device_type()==nb::device::cpu::value ? angles.nbytes():1);
+    DeviceBuffer<float> owned_starts(starts.device_type()==nb::device::cpu::value ? starts.nbytes():1);
+    DeviceBuffer<float> owned_pd(pd.device_type()==nb::device::cpu::value ? pd.nbytes():1);
+    DeviceBuffer<float> owned_weights(weights.device_type()==nb::device::cpu::value ? weights.nbytes():1);
+    DeviceBuffer<std::complex<float>> owned_signal(signal.device_type()==nb::device::cpu::value && signal.nbytes() ? signal.nbytes():1);
+    const void* dr=device_input(rc,owned_rc); const void* dq=device_input(cr,owned_cr);
+    const float* ds=device_input(scan,owned_scan); const float* dx=device_input(xe,owned_x); const float* dy=device_input(ye,owned_y);
+    const float* da=device_input(angles,owned_angles); const float* dt=device_input(starts,owned_starts);
+    float* dp=pd.device_type()==nb::device::cpu::value ? owned_pd.ptr:pd.data();
+    float* dw=weights.device_type()==nb::device::cpu::value ? owned_weights.ptr:weights.data();
+    std::complex<float>* di=signal.shape(0)==0 ? nullptr:(signal.device_type()==nb::device::cpu::value ? owned_signal.ptr:signal.data());
+    DeviceBuffer<std::complex<float>> packed_rc(rc.nbytes()), packed_cr(cr.nbytes());
+    check_status(rcabeam_pack_ensemble_device(dr,packed_rc.ptr,ns,nc,na,nt));
+    check_status(rcabeam_pack_ensemble_device(dq,packed_cr.ptr,ns,nc,na,nt));
+    // Bound St-SW scratch independently of the full grid size.
+    size_t tile=nv<4096 ? nv:4096;
+    DeviceBuffer<std::complex<float>> workspace(method==4 ? tile*k*k*nt*sizeof(std::complex<float>):1);
+    DeviceBuffer<float4> geometry_workspace(2*tile*(nc+na)*sizeof(float4));
+    for (size_t start=0; start<nv; start+=tile) {
+        size_t count=nv-start<tile ? nv-start:tile;
+        check_status(rcabeam_ensemble_device(packed_rc.ptr,packed_cr.ptr,ds+3*start,dx,dy,da,dt,dp+2*start,di ? di+start*nt:nullptr,dw+start,workspace.ptr,geometry_workspace.ptr,ns,nc,na,nt,count,c,fs,fd,fn,method,k));
+    }
+    check_cuda(cudaDeviceSynchronize());
+    if (pd.device_type()==nb::device::cpu::value) check_cuda(cudaMemcpy(pd.data(),dp,pd.nbytes(),cudaMemcpyDeviceToHost));
+    if (signal.nbytes() && signal.device_type()==nb::device::cpu::value) check_cuda(cudaMemcpy(signal.data(),di,signal.nbytes(),cudaMemcpyDeviceToHost));
+    if (method==4 && weights.device_type()==nb::device::cpu::value) check_cuda(cudaMemcpy(weights.data(),dw,weights.nbytes(),cudaMemcpyDeviceToHost));
+}
+
 NB_MODULE(_cuda_impl, m) {
     m.doc() = "Python bindings for the rcabeam CUDA core";
+    m.def("ensemble_from_channels", &ensemble_from_channels,
+        "rc"_a.noconvert(), "cr"_a.noconvert(), "scan"_a.noconvert(), "xe"_a.noconvert(), "ye"_a.noconvert(),
+        "angles"_a.noconvert(), "starts"_a.noconvert(), "pd"_a.noconvert(), "signal"_a.noconvert(), "weights"_a.noconvert(),
+        "c"_a, "fs"_a, "fd"_a, "fn"_a, "method"_a, "k"_a);
     m.def("opw", &opw, "iq"_a.noconvert(), "out"_a.noconvert());
     m.def("xdoppler_pd", &xdoppler_pd, "iq"_a.noconvert(), "out"_a.noconvert(), "rc_start"_a, "rc_count"_a, "cr_start"_a, "cr_count"_a);
     m.def("rc_fmas_pd", &rc_fmas_pd, "iq"_a.noconvert(), "out"_a.noconvert(), "rc_start"_a, "rc_count"_a, "cr_start"_a, "cr_count"_a);

@@ -14,8 +14,9 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89 90)
 endif()
 
-add_library(rcabeam_core STATIC src/${SKBUILD_PROJECT_NAME}/core.cu)
+add_library(rcabeam_core STATIC src/${SKBUILD_PROJECT_NAME}/core.cu src/${SKBUILD_PROJECT_NAME}/ensemble.cu)
 target_include_directories(rcabeam_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_options(rcabeam_core PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
 set_target_properties(rcabeam_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 nanobind_add_module(_cuda_impl NB_STATIC src/${SKBUILD_PROJECT_NAME}/bindings/python.cpp)

@@ -201,6 +201,27 @@ rcabeam_status rcabeam_opw_ensemble_pd_from_channels_device(
     float f_number
 );
 
+/* Convert (samples, channels, angles, frames) to (channels, angles, samples, frames). */
+rcabeam_status rcabeam_pack_ensemble_device(const void* source, void* target, size_t ns, size_t nc, size_t na, size_t nt);
+
+/* Packed frame-inner complex64 channels (channels, angles, samples, frames).
+ * method: 0 OPW, 1 XDoppler, 2 RC-FMAS, 3 DMAS-CCF-ACF, 4 St-SW.
+ * pd: 2*n_voxels floats; result is in the even entries after completion.
+ * signal: optional complex64 (n_voxels, n_frames) output for methods 0-3.
+ * Method 3's signal contains the real DMAS response, not complex IQ.
+ * Method 4 requires a null signal pointer.
+ * St-SW requires weights[n_voxels] and complex64 workspace[n_voxels*k*k*n_frames].
+ * Normalize St-SW weights by the full-volume maximum before multiplying PD.
+ * geometry_workspace: 2*n_voxels*(n_channels+n_angles) float4 elements.
+ * All pointers are device pointers. Launches use the default CUDA stream.
+ */
+rcabeam_status rcabeam_ensemble_device(
+    const void* rc, const void* cr, const float* scan, const float* xe, const float* ye,
+    const float* angles, const float* starts, float* pd, void* signal, float* weights,
+    void* workspace, void* geometry_workspace, size_t ns, size_t nc, size_t na, size_t nt, size_t nv,
+    float c, float fs, float fd, float fn, int method, int k
+);
+
 #ifdef __cplusplus
 }
 #endif

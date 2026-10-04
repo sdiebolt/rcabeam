@@ -1,6 +1,7 @@
 """Experimental RCA beamforming package."""
 
 from rcabeam.dmas import dmas_bruteforce, dmas_ccf_acf_core, dmas_ccf_acf_frame
+from rcabeam.ensemble import beamform_ensemble, ensemble_pd_from_channels
 from rcabeam.fmas import rc_fmas, rc_fmas_pd, signed_sqrt
 from rcabeam.fused import (
     dmas_ccf_acf_from_channels,
@@ -18,6 +19,7 @@ from rcabeam.xdoppler import compound_rc_cr, xdoppler_pd, xdoppler_signal
 
 __all__ = [
     "RCAGeometry",
+    "beamform_ensemble",
     "compound_rc_cr",
     "delay_rca_channel_data",
     "delay_rca_channels",
@@ -25,6 +27,7 @@ __all__ = [
     "dmas_ccf_acf_core",
     "dmas_ccf_acf_frame",
     "dmas_ccf_acf_from_channels",
+    "ensemble_pd_from_channels",
     "fast_pd_from_channels",
     "opw",
     "opw_ensemble_pd_from_channels",

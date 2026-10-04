@@ -93,17 +93,10 @@ def opw_ensemble_pd_from_channels(
     np.ndarray
         Mean OPW power Doppler volume with shape `(nx, nz, ny)`.
     """
-    x, z, y = grid
     if use_cuda:
-        try:
-            from rcabeam._cuda_impl import opw_ensemble_pd_from_channels as cuda_opw_ensemble_pd_from_channels
-        except ImportError:
-            pass
-        else:
-            args = _fused_args(iq_rc, iq_cr, angles, t_start, grid, geom)
-            out = np.empty(args[2].shape[0], dtype=np.float32)
-            cuda_opw_ensemble_pd_from_channels(*args[:7], out, *args[7:])
-            return out.reshape((len(x), len(z), len(y)))
+        from rcabeam.ensemble import ensemble_pd_from_channels
+
+        return ensemble_pd_from_channels(iq_rc, iq_cr, angles, t_start, grid, geom, method="opw")
 
     frames = []
     for frame in range(iq_rc.shape[-1]):
