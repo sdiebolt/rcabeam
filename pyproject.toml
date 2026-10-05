@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 matrix = [
+    "cupy-cuda13x>=14",
     "mach-beamform>=0.2.0",
 ]
 

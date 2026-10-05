@@ -1,7 +1,7 @@
 """Benchmark RCA beamforming methods on synthetic scatterers.
 
 Run:
-    uv run python examples/benchmark.py
+    uv run --extra matrix python examples/benchmark.py
 """
 
 from __future__ import annotations
@@ -156,6 +156,21 @@ def main() -> None:
     parser.add_argument("--quality", action="store_true", help="Use 160³ lambda/2-ish grid preset.")
     parser.add_argument("--frames", type=int, default=200, help="Slow-time frames for every ensemble beamformer.")
     parser.add_argument(
+        "--matrix",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include GPU-resident mach FPM by default; --no-matrix skips it (requires --extra matrix).",
+    )
+    parser.add_argument("--matrix-side", type=int, default=80, help="FPM elements per side for --matrix.")
+    parser.add_argument("--matrix-angles", type=int, default=5, help="FPM plane waves per steering axis.")
+    parser.add_argument("--matrix-frame-chunk", type=int, default=32, help="Frames per streamed raw FPM chunk.")
+    parser.add_argument(
+        "--matrix-repeat",
+        type=int,
+        default=1,
+        help="Complete FPM timing repetitions; default 1 because FPM is expensive.",
+    )
+    parser.add_argument(
         "--method",
         choices=["all", "opw", "xdoppler", "rc_fmas", "dmas", "st_sw"],
         default="all",
@@ -174,6 +189,14 @@ def main() -> None:
     )
     parser.add_argument("--full", action="store_true", help="Run staged, individual fused, St-SW, and DMAS timings.")
     args = parser.parse_args()
+    if args.matrix:
+        if min(args.matrix_side, args.matrix_angles, args.matrix_repeat, args.matrix_frame_chunk) < 1:
+            parser.error("matrix dimensions, repeat and frame chunk must be positive")
+        try:
+            import cupy  # noqa: F401
+            import mach  # noqa: F401
+        except ImportError:
+            parser.error("FPM requires mach and CuPy: use uv run --extra matrix, or --no-matrix")
     if args.include_reference and not args.full:
         parser.error("--include-reference requires --full")
     if args.iq and (args.method in ("dmas", "st_sw") or args.compare_baseline):
@@ -248,6 +271,49 @@ def main() -> None:
             note="original per-frame geometry",
         )
         timings.append(timing)
+    if args.matrix:
+        from matrix_benchmark import benchmark_matrix_ensemble
+
+        console.print(
+            f"FPM mach: {args.matrix_side}x{args.matrix_side} receivers, "
+            f"{args.matrix_angles}x{args.matrix_angles} plane waves, {args.frames} frames. "
+            f"Raw chunk: {args.matrix_side**2 * nsamp * min(args.frames, args.matrix_frame_chunk) * 8 / 1e9:.2f} GB."
+        )
+        console.print(
+            "FPM compounds IQ and reduces on GPU; only the final output is downloaded. Simulation is excluded."
+        )
+        _, elapsed, gpu_elapsed = benchmark_matrix_ensemble(
+            grid,
+            scatterers,
+            side=args.matrix_side,
+            angles_side=args.matrix_angles,
+            frames=args.frames,
+            pitch=pitch,
+            nsamp=nsamp,
+            t_start=t_start,
+            fs=geom.fs,
+            f0=f0,
+            c=geom.c,
+            return_iq=args.iq,
+            repeat=args.matrix_repeat,
+            frame_chunk=args.matrix_frame_chunk,
+        )
+        timings.append(
+            Timing(
+                "FPM",
+                "mach FPM end-to-end",
+                elapsed * 1e3,
+                f"{args.frames} frames; {args.matrix_angles**2} PW; includes raw H2D + final D2H",
+            )
+        )
+        timings.append(
+            Timing(
+                "FPM GPU",
+                "mach + compounding/reduction",
+                gpu_elapsed * 1e3,
+                "CUDA events; excludes raw transfers; not kernel-only",
+            )
+        )
     if not args.full:
         _render_timings(timings)
         return

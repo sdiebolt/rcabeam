@@ -8,7 +8,7 @@ Experimental row-column-array (RCA) beamforming kernels and references.
 uv sync --group dev
 ```
 
-Optional dense matrix reference support uses `mach-beamform`:
+Dense matrix benchmark support uses `mach-beamform` and CuPy (CUDA 13):
 
 ```bash
 uv sync --extra matrix --group dev
@@ -23,22 +23,46 @@ uv run python examples/point_target.py
 
 ## Benchmark
 
-Default 15 MHz / 80+80 RCA / 16+16 plane waves / 80³ grid / 200 slow-time frames:
+Default 15 MHz / 80+80 RCA / 16+16 plane waves / 80³ grid / 200 slow-time frames,
+plus mach FPM (80x80 receivers, 5x5 plane waves):
 
 ```bash
-uv run python examples/benchmark.py
+uv run --extra matrix python examples/benchmark.py
 ```
+
+FPM is enabled by default. Use `--no-matrix` for an RCA-only run.
 
 Smaller smoke benchmark:
 
 ```bash
-uv run python examples/benchmark.py --grid 32 --elements 16 --angles 4
+uv run python examples/benchmark.py --no-matrix --grid 32 --elements 16 --angles 4
 ```
+
+FPM streams 32-frame raw chunks (`--matrix-frame-chunk`) per plane wave.
+The default raw chunk is about **1.8 GB** instead of a full 282 GB raw ensemble.
+All plane waves accumulate directly into GPU IQ; the full compounded ensemble
+stays resident for subsequent processing. Only final IQ or power is downloaded.
+The benchmark does not perform clutter filtering.
+
+Use a smaller reference for a smoke comparison:
+
+```bash
+uv run --extra matrix python examples/benchmark.py --matrix --matrix-side 16 --matrix-angles 3 --grid 24 --frames 8
+```
+
+The FPM end-to-end row includes raw uploads, GPU coherent compounding/reduction
+and the final download, but excludes synthetic data generation. The separate
+FPM GPU row uses CUDA events and excludes raw/output transfers; it measures the
+GPU processing pipeline, **not kernel-only time**. Both report the same ensemble.
+It uses rectangular aperture weights and a different acquisition: 6400 receivers
+x 25 firings versus 80 receivers x 32 firings for RCA. FPM defaults to one complete
+repetition; use `--matrix-repeat` to change that. `--iq` exports compounded IQ
+without power reduction, preserving the slow-time ensemble for a clutter filter.
 
 Single-frame method comparison:
 
 ```bash
-uv run python examples/benchmark.py --frames 1
+uv run python examples/benchmark.py --no-matrix --frames 1
 ```
 
 All five methods are compared independently over the same ensemble. Timings
@@ -46,25 +70,25 @@ include allocation, host/device transfers, packing, reconstruction and reduction
 They exclude clutter filtering. For OPW comparison against the original kernel:
 
 ```bash
-uv run python examples/benchmark.py --method opw --compare-baseline
+uv run python examples/benchmark.py --no-matrix --method opw --compare-baseline
 ```
 
 Full benchmark, also including single-frame staged totals and legacy references:
 
 ```bash
-uv run python examples/benchmark.py --full
+uv run python examples/benchmark.py --no-matrix --full
 ```
 
 Slow NumPy reference timings are opt-in with the full benchmark:
 
 ```bash
-uv run python examples/benchmark.py --full --include-reference
+uv run python examples/benchmark.py --no-matrix --full --include-reference
 ```
 
 Quality-ish grid preset:
 
 ```bash
-uv run python examples/benchmark.py --quality
+uv run python examples/benchmark.py --no-matrix --quality
 ```
 
 ## Ensemble reconstruction
@@ -98,7 +122,7 @@ DMAS-CCF-ACF response. DMAS is **not complex IQ or conventional power Doppler**.
 Benchmark complex ensemble export, including output transfers:
 
 ```bash
-uv run python examples/benchmark.py --iq --method opw
+uv run --extra matrix python examples/benchmark.py --iq --method opw
 ```
 
 `beamform_ensemble` exports OPW IQ, XDoppler complex cross-products, or RC-FMAS
