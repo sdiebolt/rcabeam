@@ -8,6 +8,9 @@ Experimental row-column-array (RCA) beamforming kernels and references.
 uv sync --group dev
 ```
 
+CUDA builds target the local GPU by default. For GPU-less builds or another
+architecture, set `CUDAARCHS` (for example, `CUDAARCHS=90 uv sync --group dev`).
+
 Dense matrix benchmark support uses `mach-beamform` and CuPy (CUDA 13):
 
 ```bash
@@ -121,11 +124,18 @@ uv run python examples/benchmark.py --no-matrix --quality
 
 Inputs have shape `(samples, channels, angles, frames)`; RC and CR use the same
 steering angles and first-sample times. Internally, channels are packed as
-`(channels, angles, samples, frames)`. A warp processes 32 slow-time frames for
-one voxel, sharing geometry/interpolation parameters. OPW/XDoppler/RC-FMAS
-also keep eight frames per thread in register tiles; St-SW uses two. Transmit/
-receive geometry and phase rotations are computed once per voxel tile, not once
-per frame.
+`(channels, angles, samples, frames)`. For even frame counts, 16-byte-aligned
+packed inputs, and input/voxel indices fitting 32 bits, OPW uses cooperative
+channel/voxel parameter loads: each warp
+processes two voxels and 64 frames, loading pairs of complex samples in 16-byte
+vectors. Independent frame-vector loads precede interpolation to hide sample
+latency. A smaller 32-frame kernel handles short ensemble tails. Interpolation,
+phase corrections, and accumulation remain FP32. Odd frame counts, unaligned
+device inputs, or larger indices use the original scalar-load path.
+
+The scalar OPW path, XDoppler, and RC-FMAS keep eight frames per thread with one
+warp per voxel; St-SW uses two. Transmit/receive geometry and phase rotations
+are computed once per voxel tile, not once per frame.
 
 ```python
 from rcabeam import beamform_ensemble, ensemble_pd_from_channels
@@ -156,7 +166,10 @@ nonlinear complex signals. Only OPW is conventional linear beamformed IQ.
 For functional ultrasound, filtering followed by power reduction is a separate
 step: the direct unfiltered reductions are not a complete fUSI pipeline.
 
-The Python binding bounds geometry/St-SW scratch using 4096-voxel tiles.
+The Python binding uses 16384-voxel geometry tiles for OPW and 4096-voxel tiles
+for other methods, keeping St-SW scratch bounded. OPW repeats cheap interpolation
+coefficient arithmetic across frame lanes rather than serializing lane zero and
+broadcasting its results; full geometric distances and phases are still precomputed.
 Packing temporarily needs an additional copy of the raw ensembles on the GPU;
 200-frame default RC+CR input uses about 1.5 GB and packing another 1.5 GB.
 Optional `80³ × 200` complex IQ output adds about 819 MB. Larger workloads can

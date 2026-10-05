@@ -213,6 +213,9 @@ rcabeam_status rcabeam_pack_ensemble_device(const void* source, void* target, si
  * St-SW requires weights[n_voxels] and complex64 workspace[n_voxels*k*k*n_frames].
  * Normalize St-SW weights by the full-volume maximum before multiplying PD.
  * geometry_workspace: 2*n_voxels*(n_channels+n_angles) float4 elements.
+ * OPW uses FP32 vector loads for even frame counts, 16-byte-aligned RC/CR,
+ * and input/voxel indices fitting uint32. Other layouts use scalar loads
+ * without changing interpolation or accumulation precision.
  * All pointers are device pointers. Launches use the default CUDA stream.
  */
 rcabeam_status rcabeam_ensemble_device(

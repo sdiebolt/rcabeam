@@ -578,8 +578,9 @@ void ensemble_from_channels(
     DeviceBuffer<std::complex<float>> packed_rc(rc.nbytes()), packed_cr(cr.nbytes());
     check_status(rcabeam_pack_ensemble_device(dr,packed_rc.ptr,ns,nc,na,nt));
     check_status(rcabeam_pack_ensemble_device(dq,packed_cr.ptr,ns,nc,na,nt));
-    // Bound St-SW scratch independently of the full grid size.
-    size_t tile=nv<4096 ? nv:4096;
+    // Give OPW longer launches to reduce wave tails; keep nonlinear scratch bounded.
+    size_t limit=method==0 ? 16384:4096;
+    size_t tile=nv<limit ? nv:limit;
     DeviceBuffer<std::complex<float>> workspace(method==4 ? tile*k*k*nt*sizeof(std::complex<float>):1);
     DeviceBuffer<float4> geometry_workspace(2*tile*(nc+na)*sizeof(float4));
     for (size_t start=0; start<nv; start+=tile) {

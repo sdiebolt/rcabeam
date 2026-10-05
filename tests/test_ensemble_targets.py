@@ -59,3 +59,58 @@ def test_stsw_tile_boundary() -> None:
     expected = st_sw_pd(iq, np.arange(4), np.arange(4, 8), k=2)
     actual = ensemble_pd_from_channels(r, q, angles, 1e-6, grid, geom, method="st_sw")
     np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize("frames", [3, 4])
+def test_opw_tile_boundary(frames: int) -> None:
+    """OPW IQ and power agree with NumPy across the larger geometry tile boundary."""
+    el = np.array([-0.05e-3, 0.05e-3])
+    geom = RCAGeometry(x_el=el, y_el=el, fs=20e6, f_demod=15e6, fnumber=1)
+    grid = (np.zeros(1), np.array([8e-3]), np.linspace(-1e-3, 1e-3, 16385))
+    angles = np.array([-0.08, -0.02, 0.05, 0.09])
+    rng = np.random.default_rng(7)
+    r = (rng.normal(size=(368, 2, 4, frames)) + 1j * rng.normal(size=(368, 2, 4, frames))).astype(np.complex64)
+    q = (rng.normal(size=r.shape) + 1j * rng.normal(size=r.shape)).astype(np.complex64)
+    expected_frames = []
+    for frame in range(frames):
+        _, ar, _ = delay_rca_channel_data(r[..., frame], angles, 2e-6, grid, geom, "RC", use_cuda=False)
+        _, aq, _ = delay_rca_channel_data(q[..., frame], angles, 2e-6, grid, geom, "CR", use_cuda=False)
+        expected_frames.append(ar.sum(axis=-1) + aq.sum(axis=-1))
+    expected = np.stack(expected_frames, axis=-1)
+    actual = beamform_ensemble(r, q, angles, 2e-6, grid, geom)
+    np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(
+        ensemble_pd_from_channels(r, q, angles, 2e-6, grid, geom),
+        np.mean(np.abs(expected) ** 2, axis=-1),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+
+@pytest.mark.parametrize("frames", [2, 64, 66])
+@pytest.mark.parametrize("channels", [1, 17])
+def test_opw_cooperative_tails(frames: int, channels: int) -> None:
+    """Vector loads handle channel tails, odd voxel counts, and partial frame batches."""
+    el = np.array([0.001]) if channels == 1 else np.linspace(-0.006, 0.001, channels)
+    geom = RCAGeometry(x_el=el, y_el=el, fs=1e6, f_demod=0.1e6, fnumber=1)
+    grid = (np.zeros(1), np.array([0.007]), np.array([-0.001, 0.0, 0.001]))
+    angles = np.array([-0.08, 0.02, 0.09])
+    starts = np.array([1e-6, 2e-6, 3e-6])
+    rng = np.random.default_rng(19)
+    r = (rng.normal(size=(16, channels, 3, frames)) + 1j * rng.normal(size=(16, channels, 3, frames))).astype(
+        np.complex64
+    )
+    q = (rng.normal(size=r.shape) + 1j * rng.normal(size=r.shape)).astype(np.complex64)
+    expected_frames = []
+    for frame in range(frames):
+        _, ar, _ = delay_rca_channel_data(r[..., frame], angles, starts, grid, geom, "RC", use_cuda=False)
+        _, aq, _ = delay_rca_channel_data(q[..., frame], angles, starts, grid, geom, "CR", use_cuda=False)
+        expected_frames.append(ar.sum(axis=-1) + aq.sum(axis=-1))
+    expected = np.stack(expected_frames, axis=-1)
+    np.testing.assert_allclose(beamform_ensemble(r, q, angles, starts, grid, geom), expected, rtol=5e-4, atol=5e-4)
+    np.testing.assert_allclose(
+        ensemble_pd_from_channels(r, q, angles, starts, grid, geom),
+        np.mean(np.abs(expected) ** 2, axis=-1),
+        rtol=5e-4,
+        atol=5e-4,
+    )

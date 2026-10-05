@@ -1,6 +1,7 @@
 #include "rcabeam.h"
 #include <cuda_runtime.h>
 #include <math_constants.h>
+#include <cstdint>
 
 namespace {
 __device__ float2 add(float2 a, float2 b) {
@@ -53,26 +54,31 @@ __global__ void geometry(const float *scan, const float *xe, const float *ye,
 __device__ float4 parameters(const float4 *rx, const float4 *tx,
                              const float *starts, size_t nc, size_t na,
                              size_t voxel, size_t ch, size_t angle, int config,
-                             float fs) {
+                             float fs, bool broadcast = true) {
   int i0 = -1;
   float w = 0, co = 0, s = 0;
-  if ((threadIdx.x % FRAME_LANES) == 0) {
+  if (!broadcast || (threadIdx.x % FRAME_LANES) == 0) {
     float4 r = rx[(voxel * 2 + config) * nc + ch],
            t = tx[(voxel * 2 + config) * na + angle];
-    if (r.w) {
+    // OPW forms coefficients eagerly to avoid serializing loads behind the
+    // aperture test; a negative index still rejects every inactive channel.
+    if (r.w || !broadcast) {
       float index = (r.x + t.x - starts[angle]) * fs;
-      i0 = static_cast<int>(floorf(index));
-      w = index - i0;
+      int first = static_cast<int>(floorf(index));
+      i0 = r.w ? first : -1;
+      w = index - first;
       co = r.y * t.y - r.z * t.z;
       s = r.y * t.z + r.z * t.y;
     }
   }
   // Padded frame lanes still participate; voxel bounds remove entire warps.
   constexpr unsigned mask = 0xffffffff;
-  i0 = __shfl_sync(mask, i0, 0, FRAME_LANES);
-  w = __shfl_sync(mask, w, 0, FRAME_LANES);
-  co = __shfl_sync(mask, co, 0, FRAME_LANES);
-  s = __shfl_sync(mask, s, 0, FRAME_LANES);
+  if (broadcast) {
+    i0 = __shfl_sync(mask, i0, 0, FRAME_LANES);
+    w = __shfl_sync(mask, w, 0, FRAME_LANES);
+    co = __shfl_sync(mask, co, 0, FRAME_LANES);
+    s = __shfl_sync(mask, s, 0, FRAME_LANES);
+  }
   return make_float4(static_cast<float>(i0), w, co, s);
 }
 
@@ -218,8 +224,10 @@ __global__ void beamform_tiled(const float2 *rc, const float2 *cr,
   for (size_t a = 0; a < na; ++a) {
     float2 ar[REGISTER_FRAMES] = {}, aq[REGISTER_FRAMES] = {};
     for (size_t ch = 0; ch < nc; ++ch) {
-      float4 pr = parameters(rx, tx, starts, nc, na, voxel, ch, a, 0, fs);
-      float4 pq = parameters(rx, tx, starts, nc, na, voxel, ch, a, 1, fs);
+      // OPW repeats cheap, warp-uniform arithmetic instead of serializing
+      // lane zero and broadcasting four values per receive configuration.
+      float4 pr = parameters(rx, tx, starts, nc, na, voxel, ch, a, 0, fs, METHOD != 0);
+      float4 pq = parameters(rx, tx, starts, nc, na, voxel, ch, a, 1, fs, METHOD != 0);
 #pragma unroll
       for (int t = 0; t < REGISTER_FRAMES; ++t) {
         size_t frame = frame0 + t * FRAME_LANES;
@@ -267,6 +275,122 @@ __global__ void beamform_tiled(const float2 *rc, const float2 *cr,
     atomicAdd(pd + 2 * voxel, pr / nt);
     atomicAdd(pd + 2 * voxel + 1, pi / nt);
   }
+}
+
+constexpr int OPW_VOXELS_PER_WARP = 2;
+constexpr int OPW_FRAME_COLUMNS = FRAME_LANES / OPW_VOXELS_PER_WARP;
+constexpr int OPW_VECTOR_FRAMES = 2;
+constexpr int OPW_BATCH_FRAMES = 64;
+
+template <int BATCH_FRAMES>
+__global__ void
+opw_cooperative(const float2 *rc, const float2 *cr, const float4 *rx,
+                const float4 *tx, const float *starts, float *pd,
+                float2 *signal, unsigned ns, unsigned nc, unsigned na,
+                unsigned nt, unsigned nv, float fs, unsigned first_frame) {
+  static_assert(BATCH_FRAMES % (OPW_FRAME_COLUMNS * OPW_VECTOR_FRAMES) == 0);
+  constexpr int THREAD_FRAMES = BATCH_FRAMES / OPW_FRAME_COLUMNS;
+  constexpr unsigned mask = 0xffffffff;
+  int lane = threadIdx.x % FRAME_LANES;
+  int row = lane / OPW_FRAME_COLUMNS;
+  int column = lane % OPW_FRAME_COLUMNS;
+  unsigned first_voxel =
+      (blockIdx.x * (blockDim.x / FRAME_LANES) + threadIdx.x / FRAME_LANES) *
+      OPW_VOXELS_PER_WARP;
+  if (first_voxel >= nv)
+    return;
+  unsigned voxel = first_voxel + row;
+  unsigned geometry_voxel = first_voxel + lane % OPW_VOXELS_PER_WARP;
+  // Clamp the unused geometry row so every lane can participate in shuffles.
+  if (geometry_voxel >= nv)
+    geometry_voxel = nv - 1;
+  unsigned frame0 =
+      first_frame + blockIdx.y * BATCH_FRAMES + column * OPW_VECTOR_FRAMES;
+  float2 r[THREAD_FRAMES] = {}, q[THREAD_FRAMES] = {};
+#pragma unroll
+  for (int config = 0; config < 2; ++config) {
+    const float2 *iq = config == 0 ? rc : cr;
+    for (unsigned angle = 0; angle < na; ++angle) {
+      for (unsigned base = 0; base < nc; base += OPW_FRAME_COLUMNS) {
+        // Each lane prepares one channel/voxel pair. This coalesces descriptor
+        // loads and amortizes parameter arithmetic across both frame vectors.
+        unsigned geometry_channel = base + lane / OPW_VOXELS_PER_WARP;
+        float4 own =
+            geometry_channel < nc
+                ? parameters(rx, tx, starts, nc, na, geometry_voxel,
+                             geometry_channel, angle, config, fs, false)
+                : make_float4(-1, 0, 0, 0);
+        // The original float sample index encodes both integer and fractional
+        // parts losslessly, avoiding one shuffle without FP16 quantization.
+        float own_index = own.x < 0 ? -1 : own.x + own.y;
+        for (int channel = 0;
+             channel < OPW_FRAME_COLUMNS && base + channel < nc; ++channel) {
+          int source = channel * OPW_VOXELS_PER_WARP + row;
+          float index = __shfl_sync(mask, own_index, source);
+          int i0 = static_cast<int>(floorf(index));
+          float4 p =
+              make_float4(index, index - i0, __shfl_sync(mask, own.z, source),
+                          __shfl_sync(mask, own.w, source));
+          if (voxel < nv && i0 >= 0 && i0 < ns - 1) {
+            constexpr int VECTORS = THREAD_FRAMES / OPW_VECTOR_FRAMES;
+            float4 first[VECTORS], second[VECTORS];
+            // Issue independent sample loads before waiting on interpolation.
+#pragma unroll
+            for (int tile = 0; tile < VECTORS; ++tile) {
+              unsigned frame =
+                  frame0 + tile * OPW_FRAME_COLUMNS * OPW_VECTOR_FRAMES;
+              if (frame + 1 < nt) {
+                unsigned offset = (((base + channel) * na + angle) * ns +
+                                   static_cast<unsigned>(i0)) *
+                                      nt +
+                                  frame;
+                first[tile] = *reinterpret_cast<const float4 *>(iq + offset);
+                second[tile] =
+                    *reinterpret_cast<const float4 *>(iq + offset + nt);
+              }
+            }
+#pragma unroll
+            for (int tile = 0; tile < VECTORS; ++tile) {
+              unsigned frame =
+                  frame0 + tile * OPW_FRAME_COLUMNS * OPW_VECTOR_FRAMES;
+              if (frame + 1 < nt) {
+                float4 a = first[tile], b = second[tile];
+                float2 phase = make_float2(p.z, p.w);
+                float2 v0 = mul(make_float2(fmaf(p.y, b.x - a.x, a.x),
+                                            fmaf(p.y, b.y - a.y, a.y)),
+                                phase);
+                float2 v1 = mul(make_float2(fmaf(p.y, b.z - a.z, a.z),
+                                            fmaf(p.y, b.w - a.w, a.w)),
+                                phase);
+                if (config == 0) {
+                  r[tile * 2] = add(r[tile * 2], v0);
+                  r[tile * 2 + 1] = add(r[tile * 2 + 1], v1);
+                } else {
+                  q[tile * 2] = add(q[tile * 2], v0);
+                  q[tile * 2 + 1] = add(q[tile * 2 + 1], v1);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  float power = 0;
+#pragma unroll
+  for (int item = 0; item < THREAD_FRAMES; ++item) {
+    unsigned frame = frame0 + (item / 2) * OPW_FRAME_COLUMNS * 2 + item % 2;
+    if (voxel < nv && frame < nt) {
+      float2 value = add(r[item], q[item]);
+      if (signal)
+        signal[static_cast<size_t>(voxel) * nt + frame] = value;
+      power += norm2(value);
+    }
+  }
+  for (int offset = OPW_FRAME_COLUMNS / 2; offset > 0; offset >>= 1)
+    power += __shfl_down_sync(mask, power, offset, OPW_FRAME_COLUMNS);
+  if (column == 0 && voxel < nv)
+    atomicAdd(pd + 2 * static_cast<size_t>(voxel), power / nt);
 }
 
 constexpr int STSW_FRAMES = 2;
@@ -438,7 +562,38 @@ rcabeam_status rcabeam_ensemble_device(
       tx, starts, pd, static_cast<float2 *>(signal), ns, nc, na, nt, nv, fs)
   switch (method) {
   case 0:
-    TILED(0);
+    // Narrow address arithmetic only when the complete packed input fits.
+    if (nt % OPW_VECTOR_FRAMES == 0 && nv <= UINT32_MAX &&
+        ns <= UINT32_MAX / nc / na / nt &&
+        reinterpret_cast<std::uintptr_t>(rc) % alignof(float4) == 0 &&
+        reinterpret_cast<std::uintptr_t>(cr) % alignof(float4) == 0) {
+      unsigned blocks = (nv + 128 / FRAME_LANES * OPW_VOXELS_PER_WARP - 1) /
+                        (128 / FRAME_LANES * OPW_VOXELS_PER_WARP);
+      size_t remainder = nt % OPW_BATCH_FRAMES;
+#define COOPERATIVE(B, GRID, FIRST)                                            \
+  opw_cooperative<B><<<GRID, 128>>>(static_cast<const float2 *>(rc),           \
+                                    static_cast<const float2 *>(cr), rx, tx,   \
+                                    starts, pd, static_cast<float2 *>(signal), \
+                                    ns, nc, na, nt, nv, fs, FIRST)
+      if (nt >= OPW_BATCH_FRAMES) {
+        dim3 prefix(blocks, nt / OPW_BATCH_FRAMES);
+        COOPERATIVE(64, prefix, 0);
+        if (cudaGetLastError() != cudaSuccess)
+          return RCABEAM_ERROR_CUDA;
+      }
+      if (remainder) {
+        dim3 tail(blocks, 1);
+        size_t first = nt - remainder;
+        if (remainder <= 32) {
+          COOPERATIVE(32, tail, first);
+        } else {
+          COOPERATIVE(64, tail, first);
+        }
+      }
+#undef COOPERATIVE
+    } else {
+      TILED(0);
+    }
     break;
   case 1:
     TILED(1);

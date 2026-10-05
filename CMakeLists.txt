@@ -1,5 +1,9 @@
-cmake_minimum_required(VERSION 3.18...3.27)
+cmake_minimum_required(VERSION 3.24...3.27)
 set(SKBUILD_PROJECT_NAME "rcabeam")
+# Select the local GPU before project() initializes nvcc's default architecture.
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES AND NOT DEFINED ENV{CUDAARCHS})
+  set(CMAKE_CUDA_ARCHITECTURES native)
+endif()
 project(${SKBUILD_PROJECT_NAME} LANGUAGES CUDA CXX)
 
 find_package(Python 3.11 COMPONENTS Interpreter Development.Module REQUIRED)
@@ -10,10 +14,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89 90)
-endif()
-
 add_library(rcabeam_core STATIC src/${SKBUILD_PROJECT_NAME}/core.cu src/${SKBUILD_PROJECT_NAME}/ensemble.cu)
 target_include_directories(rcabeam_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_options(rcabeam_core PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
