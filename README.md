@@ -42,6 +42,16 @@ a half-sample delay reduces this pulse's reconstructed peak amplitude by about
 22%. Use a higher IQ rate or a higher-order interpolator for quantitative amplitude
 accuracy; the benchmark does not assert image equivalence to oversampled data.
 
+View actual RCA images with aligned versus half-sample acquisition clocks and
+an oversampled reference of the same pulse, all on a shared power scale:
+
+```bash
+uv run python examples/interpolation_comparison.py --napari
+```
+
+Only one anchor channel/angle is exactly aligned or half-sample shifted; other
+channels retain their physical fractional delays. The viewer opens an axial slice.
+
 Override bandwidth and IQ sampling independently (the rate must exceed bandwidth):
 
 ```bash
