@@ -119,7 +119,7 @@ def main() -> None:
     c = 1540.0
     fs = 4 * f0
     pitch = 0.1e-3
-    n_side = 80
+    n_side = 32
     n_grid = 80  # Keep the reference comparable to the RCA dev preset.
     nsamp = 1100
     t_start = 2e-6

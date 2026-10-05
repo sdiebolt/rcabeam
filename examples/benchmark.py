@@ -161,7 +161,7 @@ def main() -> None:
         default=True,
         help="Include GPU-resident mach FPM by default; --no-matrix skips it (requires --extra matrix).",
     )
-    parser.add_argument("--matrix-side", type=int, default=80, help="FPM elements per side for --matrix.")
+    parser.add_argument("--matrix-side", type=int, default=32, help="FPM elements per side for --matrix.")
     parser.add_argument("--matrix-angles", type=int, default=5, help="FPM plane waves per steering axis.")
     parser.add_argument("--matrix-frame-chunk", type=int, default=32, help="Frames per streamed raw FPM chunk.")
     parser.add_argument(

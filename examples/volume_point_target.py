@@ -50,7 +50,7 @@ def main() -> None:
     parser.add_argument("--quality", action="store_true", help="Use 160³ lambda/2-ish grid preset.")
     parser.add_argument("--fast", action="store_true", help="Use fused channel→PD paths and skip St-SW/DMAS.")
     parser.add_argument("--matrix", action="store_true", help="Add a dense matrix-array DAS reference layer in napari.")
-    parser.add_argument("--matrix-side", type=int, default=80, help="Dense matrix elements per side for --matrix.")
+    parser.add_argument("--matrix-side", type=int, default=32, help="Dense matrix elements per side for --matrix.")
     parser.add_argument("--matrix-angles", type=int, default=5, help="Dense matrix plane waves per steering axis for --matrix.")
     args = parser.parse_args()
 

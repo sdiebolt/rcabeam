@@ -24,7 +24,8 @@ uv run python examples/point_target.py
 ## Benchmark
 
 Default 15 MHz / 80+80 RCA / 16+16 plane waves / 80³ grid / 200 slow-time frames,
-plus mach FPM (80x80 receivers, 5x5 plane waves):
+plus mach FPM (32x32 = 1024 receivers, 5x5 plane waves).
+Probe dimensions (`--matrix-side`) are independent of the imaging grid (`--grid`):
 
 ```bash
 uv run --extra matrix python examples/benchmark.py
@@ -39,7 +40,7 @@ uv run python examples/benchmark.py --no-matrix --grid 32 --elements 16 --angles
 ```
 
 FPM streams 32-frame raw chunks (`--matrix-frame-chunk`) per plane wave.
-The default raw chunk is about **1.8 GB** instead of a full 282 GB raw ensemble.
+The default raw chunk is about **0.29 GB** instead of a full 45 GB raw ensemble.
 All plane waves accumulate directly into GPU IQ; the full compounded ensemble
 stays resident for subsequent processing. Only final IQ or power is downloaded.
 The benchmark does not perform clutter filtering.
@@ -54,7 +55,7 @@ The FPM end-to-end row includes raw uploads, GPU coherent compounding/reduction
 and the final download, but excludes synthetic data generation. The separate
 FPM GPU row uses CUDA events and excludes raw/output transfers; it measures the
 GPU processing pipeline, **not kernel-only time**. Both report the same ensemble.
-It uses rectangular aperture weights and a different acquisition: 6400 receivers
+It uses rectangular aperture weights and a different acquisition: 1024 receivers
 x 25 firings versus 80 receivers x 32 firings for RCA. FPM defaults to one complete
 repetition; use `--matrix-repeat` to change that. `--iq` exports compounded IQ
 without power reduction, preserving the slow-time ensemble for a clutter filter.
