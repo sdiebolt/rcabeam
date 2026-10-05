@@ -24,6 +24,7 @@ def benchmark_matrix_ensemble(
     return_iq: bool = False,
     repeat: int = 1,
     frame_chunk: int = 32,
+    bandwidth_hz: float | None = None,
 ) -> tuple[np.ndarray, float, float]:
     """Stream raw FPM chunks into mach and compound complex IQ on the GPU.
 
@@ -58,6 +59,9 @@ def benchmark_matrix_ensemble(
     frame_chunk
         Slow-time frames per raw upload and mach call. All plane waves are
         coherently compounded for each chunk, before reducing over slow time.
+    bandwidth_hz
+        Full -6 dB pulse bandwidth in Hz, with anti-alias roll-off. When omitted,
+        retain the reference simulator's legacy Gaussian pulse.
 
     Returns
     -------
@@ -97,7 +101,16 @@ def benchmark_matrix_ensemble(
     waves = [
         (
             _simulate_matrix_iq(
-                rx, scatterers, nsamp=nsamp, t_start=t_start, fs=fs, f0=f0, c=c, angle_x=float(ax), angle_y=float(ay)
+                rx,
+                scatterers,
+                nsamp=nsamp,
+                t_start=t_start,
+                fs=fs,
+                f0=f0,
+                c=c,
+                angle_x=float(ax),
+                angle_y=float(ay),
+                bandwidth_hz=bandwidth_hz,
             ),
             _tx_arrivals(scan, float(ax), float(ay), c),
         )

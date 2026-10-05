@@ -8,7 +8,10 @@ import pytest
 
 @pytest.mark.parametrize("frame_chunk", [1, 2, 32])
 @pytest.mark.parametrize("side", [2, 13])
-def test_matrix_ensemble_compounding(monkeypatch: pytest.MonkeyPatch, frame_chunk: int, side: int) -> None:
+@pytest.mark.parametrize("bandwidth_hz", [None, 6e6])
+def test_matrix_ensemble_compounding(
+    monkeypatch: pytest.MonkeyPatch, frame_chunk: int, side: int, bandwidth_hz: float | None
+) -> None:
     """Batched FPM IQ and power match coherent single-frame plane-wave sums."""
     pytest.importorskip("cupy")
     mach = pytest.importorskip("mach")
@@ -24,7 +27,16 @@ def test_matrix_ensemble_compounding(monkeypatch: pytest.MonkeyPatch, frame_chun
     for ax in np.deg2rad(np.linspace(-8, 8, 3)):
         for ay in np.deg2rad(np.linspace(-8, 8, 3)):
             channels = _simulate_matrix_iq(
-                rx, scatterers, nsamp=400, t_start=2e-6, fs=24e6, f0=6e6, c=1540, angle_x=float(ax), angle_y=float(ay)
+                rx,
+                scatterers,
+                nsamp=400,
+                t_start=2e-6,
+                fs=24e6,
+                f0=6e6,
+                c=1540,
+                angle_x=float(ax),
+                angle_y=float(ay),
+                bandwidth_hz=bandwidth_hz,
             )
             base += mach.beamform(
                 channels,
@@ -55,6 +67,7 @@ def test_matrix_ensemble_compounding(monkeypatch: pytest.MonkeyPatch, frame_chun
             c=1540,
             return_iq=return_iq,
             frame_chunk=frame_chunk,
+            bandwidth_hz=bandwidth_hz,
         )
         reference = expected if return_iq else np.mean(np.abs(expected) ** 2, axis=-1)
         np.testing.assert_allclose(actual, reference, rtol=1e-4, atol=1e-4)

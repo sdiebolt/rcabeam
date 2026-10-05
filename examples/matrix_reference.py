@@ -51,8 +51,11 @@ def _simulate_matrix_iq(
     angle_x: float = 0.0,
     angle_y: float = 0.0,
     sigma_t: float = 0.15e-6,
+    bandwidth_hz: float | None = None,
 ) -> np.ndarray:
-    """Simulate baseband IQ matrix-array channel data for one plane wave."""
+    """Simulate matrix IQ, optionally using an anti-aliased -6 dB bandwidth."""
+    from rcabeam.sim import sample_bandlimited_pulse
+
     sx, sy, sz = _plane_direction(angle_x, angle_y)
     t = t_start + np.arange(nsamp) / fs
     out = np.zeros((len(rx_coords), nsamp, 1), dtype=np.complex64)
@@ -61,7 +64,12 @@ def _simulate_matrix_iq(
         dist = np.sqrt((xp - rx_coords[:, 0]) ** 2 + (yp - rx_coords[:, 1]) ** 2 + zp**2)
         tau = tx + dist / c
         dt = t[None, :] - tau[:, None]
-        pulse = np.exp(-((dt / sigma_t) ** 2)) * np.exp(-2j * np.pi * f0 * tau[:, None])
+        envelope = (
+            np.exp(-((dt / sigma_t) ** 2))
+            if bandwidth_hz is None
+            else sample_bandlimited_pulse(tau, nsamp, t_start, fs, bandwidth_hz).T
+        )
+        pulse = envelope * np.exp(-2j * np.pi * f0 * tau[:, None])
         out[:, :, 0] += amp * pulse.astype(np.complex64)
     return out
 

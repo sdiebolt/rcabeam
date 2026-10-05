@@ -152,6 +152,17 @@ def main() -> None:
     parser.add_argument("--elements", type=int, default=80, help="RCA row/column elements per aperture.")
     parser.add_argument("--angles", type=int, default=16, help="Plane waves per RC/CR aperture.")
     parser.add_argument("--frequency", type=float, default=15e6, help="Center frequency in Hz.")
+    parser.add_argument(
+        "--bandwidth-percent",
+        type=float,
+        default=100,
+        help="Full -6 dB pulse bandwidth as a percentage of center frequency.",
+    )
+    parser.add_argument(
+        "--iq-sampling-rate",
+        type=float,
+        help="Complex IQ samples/s; default 4/3 of pulse bandwidth (20 MS/s at 15 MHz, 100%% BW).",
+    )
     parser.add_argument("--pitch", type=float, default=0.1e-3, help="Element pitch in meters.")
     parser.add_argument("--quality", action="store_true", help="Use 160³ lambda/2-ish grid preset.")
     parser.add_argument("--frames", type=int, default=200, help="Slow-time frames for every ensemble beamformer.")
@@ -205,11 +216,17 @@ def main() -> None:
         parser.error("grid, elements and frames must be positive; angles must be at least 2")
 
     f0 = args.frequency
+    bandwidth_hz = f0 * args.bandwidth_percent / 100
+    # ponytail: linear delay interpolation loses up to 22% pulse amplitude at the
+    # default rate; increase IQ rate or interpolation order for quantitative work.
+    fs = args.iq_sampling_rate if args.iq_sampling_rate is not None else 4 * bandwidth_hz / 3
+    if not np.all(np.isfinite([f0, bandwidth_hz, fs])) or f0 <= 0 or not 0 < bandwidth_hz < fs:
+        parser.error("frequency and bandwidth must be positive; IQ sampling rate must exceed full pulse bandwidth")
     pitch = args.pitch
     n_elements = args.elements
     n_grid = 160 if args.quality else args.grid
     elements = (np.arange(n_elements) - (n_elements - 1) / 2) * pitch
-    geom = RCAGeometry(x_el=elements, y_el=elements, fs=4 * f0, f_demod=f0, fnumber=1.0)
+    geom = RCAGeometry(x_el=elements, y_el=elements, fs=fs, f_demod=f0, fnumber=1.0)
     n_angles = args.angles
     angles = np.deg2rad(np.linspace(-8, 8, n_angles))
     scatterers = [
@@ -220,7 +237,8 @@ def main() -> None:
         ((2.6e-3, 7.2e-3, 2.5e-3), 0.5),
     ]
     t_start = 2e-6
-    nsamp = 1100
+    # Preserve the original 18.33 us acquisition duration, not its RF-style sample count.
+    nsamp = int(np.ceil(((1100 - 1) / 60e6) * fs)) + 1
     x = np.linspace(-4e-3, 4e-3, n_grid)
     z = np.linspace(4e-3, 12e-3, n_grid)
     y = np.linspace(-4e-3, 4e-3, n_grid)
@@ -229,8 +247,17 @@ def main() -> None:
 
     _render_setup(n_voxels, n_elements, n_angles, n_grid, f0, args.frames)
 
-    rc_ch = sum(amp * simulate_point(geom, angles, point, nsamp, t_start, "RC") for point, amp in scatterers)
-    cr_ch = sum(amp * simulate_point(geom, angles, point, nsamp, t_start, "CR") for point, amp in scatterers)
+    console.print(
+        f"IQ: {fs / 1e6:.2f} MS/s, {nsamp} samples; full -6 dB bandwidth {bandwidth_hz / 1e6:.2f} MHz ({args.bandwidth_percent:g}%)."
+    )
+    rc_ch = sum(
+        amp * simulate_point(geom, angles, point, nsamp, t_start, "RC", bandwidth_hz=bandwidth_hz)
+        for point, amp in scatterers
+    )
+    cr_ch = sum(
+        amp * simulate_point(geom, angles, point, nsamp, t_start, "CR", bandwidth_hz=bandwidth_hz)
+        for point, amp in scatterers
+    )
 
     timings: list[Timing] = []
     phase = np.exp(2j * np.pi * np.arange(args.frames, dtype=np.float32) / args.frames).astype(np.complex64)
@@ -297,6 +324,7 @@ def main() -> None:
             return_iq=args.iq,
             repeat=args.matrix_repeat,
             frame_chunk=args.matrix_frame_chunk,
+            bandwidth_hz=bandwidth_hz,
         )
         timings.append(
             Timing(

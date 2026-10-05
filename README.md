@@ -32,6 +32,21 @@ uv run --extra matrix python examples/benchmark.py
 ```
 
 FPM is enabled by default. Use `--no-matrix` for an RCA-only run.
+The benchmark uses **100% full -6 dB bandwidth** and **20 MS/s complex IQ** at
+15 MHz, not RF-style 60 MS/s. A Gaussian spectrum rolls off smoothly between
+its -6 dB band edges and Nyquist to prevent aliasing. The original acquisition
+window is retained: 368 samples instead of 1100. Both RCA and FPM use this pulse.
+Other standalone examples retain their legacy Gaussian simulation defaults.
+Nyquist-safe sampling does not make linear delay interpolation exact: at 20 MS/s,
+a half-sample delay reduces this pulse's reconstructed peak amplitude by about
+22%. Use a higher IQ rate or a higher-order interpolator for quantitative amplitude
+accuracy; the benchmark does not assert image equivalence to oversampled data.
+
+Override bandwidth and IQ sampling independently (the rate must exceed bandwidth):
+
+```bash
+uv run --extra matrix python examples/benchmark.py --bandwidth-percent 100 --iq-sampling-rate 20e6
+```
 
 Smaller smoke benchmark:
 
@@ -40,7 +55,7 @@ uv run python examples/benchmark.py --no-matrix --grid 32 --elements 16 --angles
 ```
 
 FPM streams 32-frame raw chunks (`--matrix-frame-chunk`) per plane wave.
-The default raw chunk is about **0.29 GB** instead of a full 45 GB raw ensemble.
+The default raw chunk is about **0.10 GB** instead of a full 15 GB raw ensemble.
 All plane waves accumulate directly into GPU IQ; the full compounded ensemble
 stays resident for subsequent processing. Only final IQ or power is downloaded.
 The benchmark does not perform clutter filtering.
@@ -133,7 +148,7 @@ step: the direct unfiltered reductions are not a complete fUSI pipeline.
 
 The Python binding bounds geometry/St-SW scratch using 4096-voxel tiles.
 Packing temporarily needs an additional copy of the raw ensembles on the GPU;
-200-frame default RC+CR input uses about 4.5 GB and packing another 4.5 GB.
+200-frame default RC+CR input uses about 1.5 GB and packing another 1.5 GB.
 Optional `80³ × 200` complex IQ output adds about 819 MB. Larger workloads can
 exceed VRAM. The C API accepts already-packed device buffers and caller-owned
 scratch; EchoFrame can avoid host roundtrips and repeated packing at that boundary.
