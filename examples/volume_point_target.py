@@ -29,6 +29,7 @@ from rcabeam import (
     st_sw_pd,
     xdoppler_pd,
 )
+from rcabeam.sim import depth_axis
 
 DISPLAY_FLOOR_DB = -40
 
@@ -42,16 +43,20 @@ def main() -> None:
     """Generate a 3D RCA volume and optionally open napari."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--napari", action="store_true", help="Open RCA volumes in napari.")
-    parser.add_argument("--grid", type=int, default=80, help="Voxels per x/z/y axis.")
+    parser.add_argument(
+        "--grid", type=int, default=80, help="RCA lateral points per x/y axis; axial spacing defaults to lambda/2."
+    )
     parser.add_argument("--elements", type=int, default=80, help="RCA row/column elements per aperture.")
     parser.add_argument("--angles", type=int, default=16, help="Plane waves per RC/CR aperture.")
     parser.add_argument("--frequency", type=float, default=15e6, help="Center frequency in Hz.")
     parser.add_argument("--pitch", type=float, default=0.1e-3, help="Element pitch in meters.")
-    parser.add_argument("--quality", action="store_true", help="Use 160³ lambda/2-ish grid preset.")
+    parser.add_argument("--quality", action="store_true", help="Use 160 lateral points per RCA axis.")
     parser.add_argument("--fast", action="store_true", help="Use fused channel→PD paths and skip St-SW/DMAS.")
     parser.add_argument("--matrix", action="store_true", help="Add a dense matrix-array DAS reference layer in napari.")
     parser.add_argument("--matrix-side", type=int, default=32, help="Dense matrix elements per side for --matrix.")
-    parser.add_argument("--matrix-angles", type=int, default=5, help="Dense matrix plane waves per steering axis for --matrix.")
+    parser.add_argument(
+        "--matrix-waves", type=int, choices=(1, 5), default=5, help="FPM on-axis only or five waves at 0°, ±3° x/y."
+    )
     args = parser.parse_args()
 
     f0 = args.frequency
@@ -60,7 +65,7 @@ def main() -> None:
     n_elements = args.elements
     n_grid = 160 if args.quality else args.grid
     el = (np.arange(n_elements) - (n_elements - 1) / 2) * pitch
-    geom = RCAGeometry(x_el=el, y_el=el, c=c, fs=4 * f0, f_demod=f0, fnumber=1.0)
+    geom = RCAGeometry(x_el=el, y_el=el, c=c, fs=4 * f0 / 3, f_demod=f0, fnumber=1.0)
 
     n_angles = args.angles
     angles = np.deg2rad(np.linspace(-8, 8, n_angles))
@@ -72,13 +77,25 @@ def main() -> None:
         ((2.6e-3, 7.2e-3, 2.5e-3), 0.5),
     ]
     t_start = 2e-6
-    nsamp = 1100
+    nsamp = int(np.ceil(((1100 - 1) / 60e6) * geom.fs)) + 1
     x = np.linspace(-4e-3, 4e-3, n_grid)
-    z = np.linspace(4e-3, 12e-3, n_grid)
+    z = depth_axis(4e-3, 12e-3, f0, sound_speed=c)
     y = np.linspace(-4e-3, 4e-3, n_grid)
 
-    rc_ch = sum(amp * simulate_point(geom, angles, point, nsamp, t_start, "RC") for point, amp in scatterers)
-    cr_ch = sum(amp * simulate_point(geom, angles, point, nsamp, t_start, "CR") for point, amp in scatterers)
+    rc_ch = np.asarray(
+        sum(
+            amp * simulate_point(geom, angles, point, nsamp, t_start, "RC", bandwidth_hz=f0)
+            for point, amp in scatterers
+        ),
+        dtype=np.complex64,
+    )
+    cr_ch = np.asarray(
+        sum(
+            amp * simulate_point(geom, angles, point, nsamp, t_start, "CR", bandwidth_hz=f0)
+            for point, amp in scatterers
+        ),
+        dtype=np.complex64,
+    )
     grid = (x, z, y)
     if args.fast:
         opw_volume, xdoppler_volume, fmas_volume = fast_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)
@@ -109,13 +126,13 @@ def main() -> None:
             rx_coords,
             scan,
             scatterers,
-            n_angles_side=args.matrix_angles,
-            angle_limit=8.0,
+            steering=np.deg2rad(np.array([[0, 0], [-3, 0], [3, 0], [0, -3], [0, 3]])[: args.matrix_waves]),
             nsamp=nsamp,
             t_start=t_start,
             fs=geom.fs,
             f0=f0,
             c=c,
+            bandwidth_hz=f0,
         )
         matrix_volume = np.abs(matrix_iq.reshape((len(x), len(z), len(y)))) ** 2
         print("computed dense matrix reference volume")
@@ -131,7 +148,7 @@ def main() -> None:
             layers.append(
                 viewer.add_image(
                     _db(matrix_volume).transpose(1, 2, 0),
-                    name=f"Dense matrix DAS {args.matrix_side}x{args.matrix_side}, {args.matrix_angles}x{args.matrix_angles} PW [dB]",
+                    name=f"Dense matrix DAS {args.matrix_side}x{args.matrix_side}, {args.matrix_waves} PW [dB]",
                     scale=scale,
                     contrast_limits=(DISPLAY_FLOOR_DB, 0),
                     rendering="mip",
@@ -158,10 +175,12 @@ def main() -> None:
                 )
             )
         for layer in layers:
+            if isinstance(layer, list):
+                raise TypeError("Expected a single image layer; channel splitting is not enabled")
             layer.name_overlay.visible = True
             layer.name_overlay.gridded = True
-        viewer.grid.enabled = True
-        viewer.grid.shape = (2, 3)
+        viewer.canvas.grid.enabled = True
+        viewer.canvas.grid.shape = (2, 3)
         viewer.dims.ndisplay = 3
         napari.run()
 

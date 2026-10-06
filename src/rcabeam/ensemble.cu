@@ -1,5 +1,6 @@
 #include "rcabeam.h"
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include <math_constants.h>
 #include <cstdint>
 
@@ -82,6 +83,7 @@ __device__ float4 parameters(const float4 *rx, const float4 *tx,
   return make_float4(static_cast<float>(i0), w, co, s);
 }
 
+template <bool HALF = false>
 __device__ float2 interpolate(const float2 *iq, float4 params, size_t ns,
                               size_t nc, size_t na, size_t nt, size_t ch,
                               size_t angle, size_t frame) {
@@ -91,7 +93,15 @@ __device__ float2 interpolate(const float2 *iq, float4 params, size_t ns,
   float w = params.y, co = params.z, s = params.w;
   size_t index =
       ((ch * na + angle) * ns + static_cast<size_t>(i0)) * nt + frame;
-  float2 a = iq[index], b = iq[index + nt];
+  float2 a, b;
+  if constexpr (HALF) {
+    const __half2 *packed = reinterpret_cast<const __half2 *>(iq);
+    a = __half22float2(packed[index]);
+    b = __half22float2(packed[index + nt]);
+  } else {
+    a = iq[index];
+    b = iq[index + nt];
+  }
   float2 value = make_float2(fmaf(w, b.x - a.x, a.x), fmaf(w, b.y - a.y, a.y));
   return mul(value, make_float2(co, s));
 }
@@ -113,6 +123,20 @@ __global__ void pack(const float2 *source, float2 *target, size_t ns, size_t nc,
   size_t t = i % nt, s = (i / nt) % ns, a = (i / nt / ns) % na,
          ch = i / nt / ns / na;
   target[i] = source[((s * nc + ch) * na + a) * nt + t];
+}
+
+__global__ void pack_half(const float2 *source, __half2 *target, int *range_error,
+                          size_t ns, size_t nc, size_t na, size_t nt) {
+  size_t i = blockIdx.x * static_cast<size_t>(blockDim.x) + threadIdx.x;
+  if (i >= ns * nc * na * nt)
+    return;
+  size_t t = i % nt, s = (i / nt) % ns, a = (i / nt / ns) % na,
+         ch = i / nt / ns / na;
+  float2 value = source[((s * nc + ch) * na + a) * nt + t];
+  if (!isfinite(value.x) || !isfinite(value.y) || fabsf(value.x) > 65504.f ||
+      fabsf(value.y) > 65504.f)
+    atomicExch(range_error, 1);
+  target[i] = __floats2half2_rn(value.x, value.y);
 }
 
 __global__ void dmas_batched(const float2 *rc, const float2 *cr,
@@ -208,7 +232,7 @@ __global__ void dmas_batched(const float2 *rc, const float2 *cr,
 
 constexpr int REGISTER_FRAMES = 8;
 
-template <int METHOD>
+template <int METHOD, bool HALF = false>
 __global__ void beamform_tiled(const float2 *rc, const float2 *cr,
                                const float4 *rx, const float4 *tx,
                                const float *starts, float *pd, float2 *signal,
@@ -231,8 +255,8 @@ __global__ void beamform_tiled(const float2 *rc, const float2 *cr,
 #pragma unroll
       for (int t = 0; t < REGISTER_FRAMES; ++t) {
         size_t frame = frame0 + t * FRAME_LANES;
-        float2 vr = interpolate(rc, pr, ns, nc, na, nt, ch, a, frame);
-        float2 vq = interpolate(cr, pq, ns, nc, na, nt, ch, a, frame);
+        float2 vr = interpolate<HALF>(rc, pr, ns, nc, na, nt, ch, a, frame);
+        float2 vq = interpolate<HALF>(cr, pq, ns, nc, na, nt, ch, a, frame);
         if (METHOD == 2) {
           ar[t] = add(ar[t], vr);
           aq[t] = add(aq[t], vq);
@@ -277,31 +301,54 @@ __global__ void beamform_tiled(const float2 *rc, const float2 *cr,
   }
 }
 
+__device__ float2 complex_mac(float2 phase, float2 value, float2 acc) {
+  // Keep rotation and accumulation fused, rather than materializing a product.
+  return make_float2(fmaf(-phase.y, value.y, fmaf(phase.x, value.x, acc.x)),
+                    fmaf(phase.y, value.x, fmaf(phase.x, value.y, acc.y)));
+}
+
 constexpr int OPW_VOXELS_PER_WARP = 2;
-constexpr int OPW_FRAME_COLUMNS = FRAME_LANES / OPW_VOXELS_PER_WARP;
 constexpr int OPW_VECTOR_FRAMES = 2;
 constexpr int OPW_BATCH_FRAMES = 64;
 
-template <int BATCH_FRAMES>
+template <bool HALF>
+__device__ float4 load_iq_pair(const float2 *iq, unsigned offset) {
+  if constexpr (HALF) {
+    ushort4 packed = *reinterpret_cast<const ushort4 *>(
+        reinterpret_cast<const __half2 *>(iq) + offset);
+    return make_float4(__half2float(__ushort_as_half(packed.x)),
+                       __half2float(__ushort_as_half(packed.y)),
+                       __half2float(__ushort_as_half(packed.z)),
+                       __half2float(__ushort_as_half(packed.w)));
+  } else {
+    return *reinterpret_cast<const float4 *>(iq + offset);
+  }
+}
+
+template <int BATCH_FRAMES, int VOXELS_PER_WARP, bool HALF = false>
 __global__ void
 opw_cooperative(const float2 *rc, const float2 *cr, const float4 *rx,
                 const float4 *tx, const float *starts, float *pd,
                 float2 *signal, unsigned ns, unsigned nc, unsigned na,
                 unsigned nt, unsigned nv, float fs, unsigned first_frame) {
+  constexpr int OPW_FRAME_COLUMNS = FRAME_LANES / VOXELS_PER_WARP;
+  static_assert(VOXELS_PER_WARP > 0 && FRAME_LANES % VOXELS_PER_WARP == 0);
   static_assert(BATCH_FRAMES % (OPW_FRAME_COLUMNS * OPW_VECTOR_FRAMES) == 0);
   constexpr int THREAD_FRAMES = BATCH_FRAMES / OPW_FRAME_COLUMNS;
   constexpr unsigned mask = 0xffffffff;
   int lane = threadIdx.x % FRAME_LANES;
+  // Four warps per 128-thread block; each warp owns its coefficient table.
+  __shared__ float2 phase_weights[4][FRAME_LANES];
   int row = lane / OPW_FRAME_COLUMNS;
   int column = lane % OPW_FRAME_COLUMNS;
   unsigned first_voxel =
       (blockIdx.x * (blockDim.x / FRAME_LANES) + threadIdx.x / FRAME_LANES) *
-      OPW_VOXELS_PER_WARP;
+      VOXELS_PER_WARP;
   if (first_voxel >= nv)
     return;
   unsigned voxel = first_voxel + row;
-  unsigned geometry_voxel = first_voxel + lane % OPW_VOXELS_PER_WARP;
-  // Clamp the unused geometry row so every lane can participate in shuffles.
+  unsigned geometry_voxel = first_voxel + lane % VOXELS_PER_WARP;
+  // Clamp unused geometry rows so every lane can participate in shuffles.
   if (geometry_voxel >= nv)
     geometry_voxel = nv - 1;
   unsigned frame0 =
@@ -313,8 +360,8 @@ opw_cooperative(const float2 *rc, const float2 *cr, const float4 *rx,
     for (unsigned angle = 0; angle < na; ++angle) {
       for (unsigned base = 0; base < nc; base += OPW_FRAME_COLUMNS) {
         // Each lane prepares one channel/voxel pair. This coalesces descriptor
-        // loads and amortizes parameter arithmetic across both frame vectors.
-        unsigned geometry_channel = base + lane / OPW_VOXELS_PER_WARP;
+        // loads and amortizes parameter arithmetic across the frame tile.
+        unsigned geometry_channel = base + lane / VOXELS_PER_WARP;
         float4 own =
             geometry_channel < nc
                 ? parameters(rx, tx, starts, nc, na, geometry_voxel,
@@ -323,14 +370,15 @@ opw_cooperative(const float2 *rc, const float2 *cr, const float4 *rx,
         // The original float sample index encodes both integer and fractional
         // parts losslessly, avoiding one shuffle without FP16 quantization.
         float own_index = own.x < 0 ? -1 : own.x + own.y;
+        phase_weights[threadIdx.x / FRAME_LANES][lane] = make_float2(own.z, own.w);
+        __syncwarp(mask);
         for (int channel = 0;
              channel < OPW_FRAME_COLUMNS && base + channel < nc; ++channel) {
-          int source = channel * OPW_VOXELS_PER_WARP + row;
+          int source = channel * VOXELS_PER_WARP + row;
           float index = __shfl_sync(mask, own_index, source);
           int i0 = static_cast<int>(floorf(index));
-          float4 p =
-              make_float4(index, index - i0, __shfl_sync(mask, own.z, source),
-                          __shfl_sync(mask, own.w, source));
+          float2 phase_weight = phase_weights[threadIdx.x / FRAME_LANES][source];
+          float4 p = make_float4(index, index - i0, phase_weight.x, phase_weight.y);
           if (voxel < nv && i0 >= 0 && i0 < ns - 1) {
             constexpr int VECTORS = THREAD_FRAMES / OPW_VECTOR_FRAMES;
             float4 first[VECTORS], second[VECTORS];
@@ -344,9 +392,8 @@ opw_cooperative(const float2 *rc, const float2 *cr, const float4 *rx,
                                    static_cast<unsigned>(i0)) *
                                       nt +
                                   frame;
-                first[tile] = *reinterpret_cast<const float4 *>(iq + offset);
-                second[tile] =
-                    *reinterpret_cast<const float4 *>(iq + offset + nt);
+                first[tile] = load_iq_pair<HALF>(iq, offset);
+                second[tile] = load_iq_pair<HALF>(iq, offset + nt);
               }
             }
 #pragma unroll
@@ -356,23 +403,23 @@ opw_cooperative(const float2 *rc, const float2 *cr, const float4 *rx,
               if (frame + 1 < nt) {
                 float4 a = first[tile], b = second[tile];
                 float2 phase = make_float2(p.z, p.w);
-                float2 v0 = mul(make_float2(fmaf(p.y, b.x - a.x, a.x),
-                                            fmaf(p.y, b.y - a.y, a.y)),
-                                phase);
-                float2 v1 = mul(make_float2(fmaf(p.y, b.z - a.z, a.z),
-                                            fmaf(p.y, b.w - a.w, a.w)),
-                                phase);
+                float2 v0 = make_float2(fmaf(p.y, b.x - a.x, a.x),
+                                       fmaf(p.y, b.y - a.y, a.y));
+                float2 v1 = make_float2(fmaf(p.y, b.z - a.z, a.z),
+                                       fmaf(p.y, b.w - a.w, a.w));
                 if (config == 0) {
-                  r[tile * 2] = add(r[tile * 2], v0);
-                  r[tile * 2 + 1] = add(r[tile * 2 + 1], v1);
+                  r[tile * 2] = complex_mac(phase, v0, r[tile * 2]);
+                  r[tile * 2 + 1] = complex_mac(phase, v1, r[tile * 2 + 1]);
                 } else {
-                  q[tile * 2] = add(q[tile * 2], v0);
-                  q[tile * 2 + 1] = add(q[tile * 2 + 1], v1);
+                  q[tile * 2] = complex_mac(phase, v0, q[tile * 2]);
+                  q[tile * 2 + 1] = complex_mac(phase, v1, q[tile * 2 + 1]);
                 }
               }
             }
           }
         }
+        // Finish every shared read before any lane overwrites the next group.
+        __syncwarp(mask);
       }
     }
   }
@@ -528,7 +575,23 @@ rcabeam_status rcabeam_pack_ensemble_device(const void *source, void *target,
                                            : RCABEAM_ERROR_CUDA;
 }
 
-rcabeam_status rcabeam_ensemble_device(
+rcabeam_status rcabeam_pack_ensemble_fp16_device(
+    const void *source, void *target, int *range_error,
+    size_t ns, size_t nc, size_t na, size_t nt) {
+  if (!source || !target || !range_error || !ns || !nc || !na || !nt ||
+      ns > SIZE_MAX / nc / na / nt ||
+      reinterpret_cast<std::uintptr_t>(source) % alignof(float2) != 0 ||
+      reinterpret_cast<std::uintptr_t>(target) % alignof(__half2) != 0 ||
+      reinterpret_cast<std::uintptr_t>(range_error) % alignof(int) != 0)
+    return RCABEAM_ERROR_ARGUMENT;
+  pack_half<<<(ns * nc * na * nt + 255) / 256, 256>>>(
+      static_cast<const float2 *>(source), static_cast<__half2 *>(target),
+      range_error, ns, nc, na, nt);
+  return cudaGetLastError() == cudaSuccess ? RCABEAM_SUCCESS : RCABEAM_ERROR_CUDA;
+}
+
+template <bool HALF>
+static rcabeam_status ensemble_impl(
     const void *rc, const void *cr, const float *scan, const float *xe,
     const float *ye, const float *angles, const float *starts, float *pd,
     void *signal, float *weights, void *workspace, void *geometry_workspace,
@@ -538,6 +601,8 @@ rcabeam_status rcabeam_ensemble_device(
       ns < 2 || !nc || !na || !nt || !nv || c <= 0 || fs <= 0 || method < 0 ||
       method > 4 || !isfinite(c) || !isfinite(fs) || !isfinite(fd) ||
       !isfinite(fn))
+    return RCABEAM_ERROR_ARGUMENT;
+  if (HALF && method != 0)
     return RCABEAM_ERROR_ARGUMENT;
   if (method == 4 && (!weights || !workspace || signal || k < 2 || k > 4 ||
                       na < static_cast<size_t>(k)))
@@ -557,37 +622,44 @@ rcabeam_status rcabeam_ensemble_device(
   dim3 tiled_grid(grid.x, (nt + FRAME_LANES * REGISTER_FRAMES - 1) /
                               (FRAME_LANES * REGISTER_FRAMES));
 #define TILED(M)                                                               \
-  beamform_tiled<M><<<tiled_grid, 128>>>(                                      \
+  beamform_tiled<M, HALF && (M == 0)><<<tiled_grid, 128>>>(                                      \
       static_cast<const float2 *>(rc), static_cast<const float2 *>(cr), rx,    \
       tx, starts, pd, static_cast<float2 *>(signal), ns, nc, na, nt, nv, fs)
+  constexpr size_t input_alignment = HALF ? alignof(ushort4) : alignof(float4);
   switch (method) {
   case 0:
     // Narrow address arithmetic only when the complete packed input fits.
     if (nt % OPW_VECTOR_FRAMES == 0 && nv <= UINT32_MAX &&
         ns <= UINT32_MAX / nc / na / nt &&
-        reinterpret_cast<std::uintptr_t>(rc) % alignof(float4) == 0 &&
-        reinterpret_cast<std::uintptr_t>(cr) % alignof(float4) == 0) {
+        reinterpret_cast<std::uintptr_t>(rc) % input_alignment == 0 &&
+        reinterpret_cast<std::uintptr_t>(cr) % input_alignment == 0) {
       unsigned blocks = (nv + 128 / FRAME_LANES * OPW_VOXELS_PER_WARP - 1) /
                         (128 / FRAME_LANES * OPW_VOXELS_PER_WARP);
       size_t remainder = nt % OPW_BATCH_FRAMES;
-#define COOPERATIVE(B, GRID, FIRST)                                            \
-  opw_cooperative<B><<<GRID, 128>>>(static_cast<const float2 *>(rc),           \
-                                    static_cast<const float2 *>(cr), rx, tx,   \
-                                    starts, pd, static_cast<float2 *>(signal), \
-                                    ns, nc, na, nt, nv, fs, FIRST)
+#define COOPERATIVE(B, V, GRID, FIRST)                                         \
+  opw_cooperative<B, V, HALF><<<GRID, 128>>>(                                    \
+      static_cast<const float2 *>(rc), static_cast<const float2 *>(cr), rx,    \
+      tx, starts, pd, static_cast<float2 *>(signal), ns, nc, na, nt, nv, fs,   \
+      FIRST)
       if (nt >= OPW_BATCH_FRAMES) {
         dim3 prefix(blocks, nt / OPW_BATCH_FRAMES);
-        COOPERATIVE(64, prefix, 0);
+        COOPERATIVE(64, OPW_VOXELS_PER_WARP, prefix, 0);
         if (cudaGetLastError() != cudaSuccess)
           return RCABEAM_ERROR_CUDA;
       }
       if (remainder) {
         dim3 tail(blocks, 1);
         size_t first = nt - remainder;
-        if (remainder <= 32) {
-          COOPERATIVE(32, tail, first);
+        if (remainder <= 8) {
+          // Eight voxels per warp give every lane useful work for an 8-frame
+          // tail.
+          constexpr unsigned voxels_per_block = 128 / FRAME_LANES * 8;
+          dim3 short_tail((nv + voxels_per_block - 1) / voxels_per_block, 1);
+          COOPERATIVE(8, 8, short_tail, first);
+        } else if (remainder <= 32) {
+          COOPERATIVE(32, OPW_VOXELS_PER_WARP, tail, first);
         } else {
-          COOPERATIVE(64, tail, first);
+          COOPERATIVE(64, OPW_VOXELS_PER_WARP, tail, first);
         }
       }
 #undef COOPERATIVE
@@ -632,4 +704,28 @@ rcabeam_status rcabeam_ensemble_device(
       pd, weights, static_cast<const float2 *>(workspace), nv, nt, method, k);
   return cudaGetLastError() == cudaSuccess ? RCABEAM_SUCCESS
                                            : RCABEAM_ERROR_CUDA;
+}
+
+rcabeam_status rcabeam_ensemble_device(
+    const void *rc, const void *cr, const float *scan, const float *xe,
+    const float *ye, const float *angles, const float *starts, float *pd,
+    void *signal, float *weights, void *workspace, void *geometry_workspace,
+    size_t ns, size_t nc, size_t na, size_t nt, size_t nv, float c, float fs,
+    float fd, float fn, int method, int k) {
+  return ensemble_impl<false>(rc, cr, scan, xe, ye, angles, starts, pd, signal,
+      weights, workspace, geometry_workspace, ns, nc, na, nt, nv, c, fs, fd,
+      fn, method, k);
+}
+
+rcabeam_status rcabeam_opw_fp16_device(
+    const void *rc, const void *cr, const float *scan, const float *xe,
+    const float *ye, const float *angles, const float *starts, float *pd,
+    void *signal, void *geometry_workspace, size_t ns, size_t nc, size_t na,
+    size_t nt, size_t nv, float c, float fs, float fd, float fn) {
+  if (reinterpret_cast<std::uintptr_t>(rc) % alignof(__half2) != 0 ||
+      reinterpret_cast<std::uintptr_t>(cr) % alignof(__half2) != 0)
+    return RCABEAM_ERROR_ARGUMENT;
+  return ensemble_impl<true>(rc, cr, scan, xe, ye, angles, starts, pd, signal,
+      nullptr, nullptr, geometry_workspace, ns, nc, na, nt, nv, c, fs, fd, fn,
+      0, 2);
 }

@@ -28,7 +28,8 @@ template <typename T>
 struct DeviceBuffer {
     T* ptr = nullptr;
     explicit DeviceBuffer(size_t bytes) {
-        check_cuda(cudaMalloc(&ptr, bytes));
+        // One byte is the existing sentinel for borrowed or unused buffers.
+        if (bytes > 1) check_cuda(cudaMalloc(&ptr, bytes));
     }
     ~DeviceBuffer() {
         if (ptr != nullptr) cudaFree(ptr);
@@ -367,55 +368,6 @@ void fused_pd_from_channels(
     if (out.device_type() == nb::device::cpu::value) check_cuda(cudaMemcpy(out.data(), d_out, out.nbytes(), cudaMemcpyDeviceToHost));
 }
 
-void opw_ensemble_pd_from_channels(
-    nb::ndarray<const std::complex<float>, nb::ndim<4>, nb::c_contig> iq_rc,
-    nb::ndarray<const std::complex<float>, nb::ndim<4>, nb::c_contig> iq_cr,
-    nb::ndarray<const float, nb::shape<-1, 3>, nb::c_contig> scan_coords_m,
-    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> x_elements_m,
-    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> y_elements_m,
-    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> angles_rad,
-    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> t_start_s,
-    nb::ndarray<float, nb::ndim<1>, nb::c_contig> out,
-    float sound_speed_m_s,
-    float sampling_freq_hz,
-    float demod_freq_hz,
-    float f_number
-) {
-    size_t n_samples = iq_rc.shape(0);
-    size_t n_channels = iq_rc.shape(1);
-    size_t n_angles = iq_rc.shape(2);
-    size_t n_frames = iq_rc.shape(3);
-    size_t n_voxels = scan_coords_m.shape(0);
-    if (iq_cr.shape(0) != n_samples || iq_cr.shape(1) != n_channels || iq_cr.shape(2) != n_angles || iq_cr.shape(3) != n_frames) throw std::invalid_argument("RC and CR ensemble data shapes must match");
-    if (x_elements_m.shape(0) != n_channels || y_elements_m.shape(0) != n_channels || angles_rad.shape(0) != n_angles || t_start_s.shape(0) != n_angles) throw std::invalid_argument("geometry shapes must match channel data");
-    if (out.shape(0) != n_voxels) throw std::invalid_argument("out must have shape (n_voxels,)");
-
-    DeviceBuffer<std::complex<float>> owned_rc(iq_rc.device_type() == nb::device::cpu::value ? iq_rc.nbytes() : 1);
-    DeviceBuffer<std::complex<float>> owned_cr(iq_cr.device_type() == nb::device::cpu::value ? iq_cr.nbytes() : 1);
-    DeviceBuffer<float> owned_scan(scan_coords_m.device_type() == nb::device::cpu::value ? scan_coords_m.nbytes() : 1);
-    DeviceBuffer<float> owned_x(x_elements_m.device_type() == nb::device::cpu::value ? x_elements_m.nbytes() : 1);
-    DeviceBuffer<float> owned_y(y_elements_m.device_type() == nb::device::cpu::value ? y_elements_m.nbytes() : 1);
-    DeviceBuffer<float> owned_angles(angles_rad.device_type() == nb::device::cpu::value ? angles_rad.nbytes() : 1);
-    DeviceBuffer<float> owned_tstart(t_start_s.device_type() == nb::device::cpu::value ? t_start_s.nbytes() : 1);
-    DeviceBuffer<float> owned_out(out.device_type() == nb::device::cpu::value ? out.nbytes() : 1);
-
-    const void* d_rc = device_input(iq_rc, owned_rc);
-    const void* d_cr = device_input(iq_cr, owned_cr);
-    const float* d_scan = device_input(scan_coords_m, owned_scan);
-    const float* d_x = device_input(x_elements_m, owned_x);
-    const float* d_y = device_input(y_elements_m, owned_y);
-    const float* d_angles = device_input(angles_rad, owned_angles);
-    const float* d_tstart = device_input(t_start_s, owned_tstart);
-    float* d_out = out.device_type() == nb::device::cpu::value ? owned_out.ptr : out.data();
-
-    check_status(rcabeam_opw_ensemble_pd_from_channels_device(
-        d_rc, d_cr, d_scan, d_x, d_y, d_angles, d_tstart, d_out,
-        n_samples, n_channels, n_angles, n_frames, n_voxels, sound_speed_m_s, sampling_freq_hz, demod_freq_hz, f_number
-    ));
-    check_cuda(cudaDeviceSynchronize());
-    if (out.device_type() == nb::device::cpu::value) check_cuda(cudaMemcpy(out.data(), d_out, out.nbytes(), cudaMemcpyDeviceToHost));
-}
-
 void fast_pd_from_channels(
     nb::ndarray<const std::complex<float>, nb::ndim<3>, nb::c_contig> iq_rc,
     nb::ndarray<const std::complex<float>, nb::ndim<3>, nb::c_contig> iq_cr,
@@ -540,7 +492,7 @@ void rc_fmas_pd_from_channels(
     fused_pd_from_channels(iq_rc, iq_cr, scan_coords_m, x_elements_m, y_elements_m, angles_rad, t_start_s, out, sound_speed_m_s, sampling_freq_hz, demod_freq_hz, f_number, 2);
 }
 
-void ensemble_from_channels(
+double ensemble_from_channels(
     nb::ndarray<const std::complex<float>, nb::ndim<4>, nb::c_contig> rc,
     nb::ndarray<const std::complex<float>, nb::ndim<4>, nb::c_contig> cr,
     nb::ndarray<const float, nb::shape<-1, 3>, nb::c_contig> scan,
@@ -551,14 +503,15 @@ void ensemble_from_channels(
     nb::ndarray<float, nb::shape<-1, 2>, nb::c_contig> pd,
     nb::ndarray<std::complex<float>, nb::ndim<2>, nb::c_contig> signal,
     nb::ndarray<float, nb::ndim<1>, nb::c_contig> weights,
-    float c, float fs, float fd, float fn, int method, int k
+    float c, float fs, float fd, float fn, int method, int k, bool half_storage
 ) {
     size_t ns=rc.shape(0), nc=rc.shape(1), na=rc.shape(2), nt=rc.shape(3), nv=scan.shape(0);
     for (size_t axis=0; axis<4; ++axis) if (rc.shape(axis) != cr.shape(axis)) throw std::invalid_argument("RC/CR ensemble shapes must match");
     if (ns<2 || !nc || !na || !nt || !nv || method<0 || method>4) throw std::invalid_argument("invalid ensemble dimensions or method");
     if (xe.shape(0)!=nc || ye.shape(0)!=nc || angles.shape(0)!=na || starts.shape(0)!=na) throw std::invalid_argument("geometry must match channel data");
-    if (pd.shape(0)!=nv || weights.shape(0)!=nv || signal.shape(1)!=nt || (signal.shape(0)!=0 && signal.shape(0)!=nv)) throw std::invalid_argument("invalid ensemble output shapes");
+    if (pd.shape(0)!=nv || (method==4 && weights.shape(0)!=nv) || signal.shape(1)!=nt || (signal.shape(0)!=0 && signal.shape(0)!=nv)) throw std::invalid_argument("invalid ensemble output shapes");
     if (method==4 && (k<2 || k>4 || na<static_cast<size_t>(k))) throw std::invalid_argument("St-SW needs 2<=k<=4 and at least k angles");
+    if (half_storage && method != 0) throw std::invalid_argument("FP16 IQ storage is supported only for OPW");
     DeviceBuffer<std::complex<float>> owned_rc(rc.device_type()==nb::device::cpu::value ? rc.nbytes():1);
     DeviceBuffer<std::complex<float>> owned_cr(cr.device_type()==nb::device::cpu::value ? cr.nbytes():1);
     DeviceBuffer<float> owned_scan(scan.device_type()==nb::device::cpu::value ? scan.nbytes():1);
@@ -567,44 +520,67 @@ void ensemble_from_channels(
     DeviceBuffer<float> owned_angles(angles.device_type()==nb::device::cpu::value ? angles.nbytes():1);
     DeviceBuffer<float> owned_starts(starts.device_type()==nb::device::cpu::value ? starts.nbytes():1);
     DeviceBuffer<float> owned_pd(pd.device_type()==nb::device::cpu::value ? pd.nbytes():1);
-    DeviceBuffer<float> owned_weights(weights.device_type()==nb::device::cpu::value ? weights.nbytes():1);
+    DeviceBuffer<float> owned_weights(method==4 && weights.device_type()==nb::device::cpu::value ? weights.nbytes():0);
     DeviceBuffer<std::complex<float>> owned_signal(signal.device_type()==nb::device::cpu::value && signal.nbytes() ? signal.nbytes():1);
+    auto upload_start = std::chrono::steady_clock::now();
     const void* dr=device_input(rc,owned_rc); const void* dq=device_input(cr,owned_cr);
+    bool uploaded = rc.device_type()==nb::device::cpu::value || cr.device_type()==nb::device::cpu::value;
+    // Include pageable staging and completion of the raw uploads, not allocation.
+    if (uploaded) check_cuda(cudaStreamSynchronize(nullptr));
+    double raw_upload_seconds = uploaded
+        ? std::chrono::duration<double>(std::chrono::steady_clock::now() - upload_start).count() : 0.0;
     const float* ds=device_input(scan,owned_scan); const float* dx=device_input(xe,owned_x); const float* dy=device_input(ye,owned_y);
     const float* da=device_input(angles,owned_angles); const float* dt=device_input(starts,owned_starts);
     float* dp=pd.device_type()==nb::device::cpu::value ? owned_pd.ptr:pd.data();
-    float* dw=weights.device_type()==nb::device::cpu::value ? owned_weights.ptr:weights.data();
+    float* dw=method==4 ? (weights.device_type()==nb::device::cpu::value ? owned_weights.ptr:weights.data()):nullptr;
     std::complex<float>* di=signal.shape(0)==0 ? nullptr:(signal.device_type()==nb::device::cpu::value ? owned_signal.ptr:signal.data());
-    DeviceBuffer<std::complex<float>> packed_rc(rc.nbytes()), packed_cr(cr.nbytes());
-    check_status(rcabeam_pack_ensemble_device(dr,packed_rc.ptr,ns,nc,na,nt));
-    check_status(rcabeam_pack_ensemble_device(dq,packed_cr.ptr,ns,nc,na,nt));
+    size_t packed_bytes = rc.nbytes() / (half_storage ? 2 : 1);
+    DeviceBuffer<std::complex<float>> packed_rc(packed_bytes), packed_cr(packed_bytes);
+    if (half_storage) {
+        DeviceBuffer<int> range_error(sizeof(int));
+        check_cuda(cudaMemset(range_error.ptr, 0, sizeof(int)));
+        check_status(rcabeam_pack_ensemble_fp16_device(dr,packed_rc.ptr,range_error.ptr,ns,nc,na,nt));
+        check_status(rcabeam_pack_ensemble_fp16_device(dq,packed_cr.ptr,range_error.ptr,ns,nc,na,nt));
+        int invalid = 0;
+        check_cuda(cudaMemcpy(&invalid,range_error.ptr,sizeof(int),cudaMemcpyDeviceToHost));
+        if (invalid) throw std::invalid_argument("FP16 IQ requires finite components within +/-65504; rescale inputs explicitly");
+    } else {
+        check_status(rcabeam_pack_ensemble_device(dr,packed_rc.ptr,ns,nc,na,nt));
+        check_status(rcabeam_pack_ensemble_device(dq,packed_cr.ptr,ns,nc,na,nt));
+    }
     // Give OPW longer launches to reduce wave tails; keep nonlinear scratch bounded.
     size_t limit=method==0 ? 16384:4096;
     size_t tile=nv<limit ? nv:limit;
-    DeviceBuffer<std::complex<float>> workspace(method==4 ? tile*k*k*nt*sizeof(std::complex<float>):1);
+    DeviceBuffer<std::complex<float>> workspace(method==4 ? tile*k*k*nt*sizeof(std::complex<float>):0);
     DeviceBuffer<float4> geometry_workspace(2*tile*(nc+na)*sizeof(float4));
     for (size_t start=0; start<nv; start+=tile) {
         size_t count=nv-start<tile ? nv-start:tile;
-        check_status(rcabeam_ensemble_device(packed_rc.ptr,packed_cr.ptr,ds+3*start,dx,dy,da,dt,dp+2*start,di ? di+start*nt:nullptr,dw+start,workspace.ptr,geometry_workspace.ptr,ns,nc,na,nt,count,c,fs,fd,fn,method,k));
+        if (half_storage) {
+            check_status(rcabeam_opw_fp16_device(packed_rc.ptr,packed_cr.ptr,ds+3*start,dx,dy,da,dt,dp+2*start,di ? di+start*nt:nullptr,geometry_workspace.ptr,ns,nc,na,nt,count,c,fs,fd,fn));
+        } else {
+            check_status(rcabeam_ensemble_device(packed_rc.ptr,packed_cr.ptr,ds+3*start,dx,dy,da,dt,dp+2*start,di ? di+start*nt:nullptr,dw ? dw+start:nullptr,workspace.ptr,geometry_workspace.ptr,ns,nc,na,nt,count,c,fs,fd,fn,method,k));
+        }
     }
     check_cuda(cudaDeviceSynchronize());
     if (pd.device_type()==nb::device::cpu::value) check_cuda(cudaMemcpy(pd.data(),dp,pd.nbytes(),cudaMemcpyDeviceToHost));
     if (signal.nbytes() && signal.device_type()==nb::device::cpu::value) check_cuda(cudaMemcpy(signal.data(),di,signal.nbytes(),cudaMemcpyDeviceToHost));
     if (method==4 && weights.device_type()==nb::device::cpu::value) check_cuda(cudaMemcpy(weights.data(),dw,weights.nbytes(),cudaMemcpyDeviceToHost));
+    return raw_upload_seconds;
 }
 
 NB_MODULE(_cuda_impl, m) {
     m.doc() = "Python bindings for the rcabeam CUDA core";
-    m.def("ensemble_from_channels", &ensemble_from_channels,
+    m.def("ensemble_from_channels", &ensemble_from_channels, nb::call_guard<nb::gil_scoped_release>(),
         "rc"_a.noconvert(), "cr"_a.noconvert(), "scan"_a.noconvert(), "xe"_a.noconvert(), "ye"_a.noconvert(),
         "angles"_a.noconvert(), "starts"_a.noconvert(), "pd"_a.noconvert(), "signal"_a.noconvert(), "weights"_a.noconvert(),
-        "c"_a, "fs"_a, "fd"_a, "fn"_a, "method"_a, "k"_a);
-    m.def("opw", &opw, "iq"_a.noconvert(), "out"_a.noconvert());
-    m.def("xdoppler_pd", &xdoppler_pd, "iq"_a.noconvert(), "out"_a.noconvert(), "rc_start"_a, "rc_count"_a, "cr_start"_a, "cr_count"_a);
-    m.def("rc_fmas_pd", &rc_fmas_pd, "iq"_a.noconvert(), "out"_a.noconvert(), "rc_start"_a, "rc_count"_a, "cr_start"_a, "cr_count"_a);
+        "c"_a, "fs"_a, "fd"_a, "fn"_a, "method"_a, "k"_a, "half_storage"_a = false);
+    m.def("opw", &opw, nb::call_guard<nb::gil_scoped_release>(), "iq"_a.noconvert(), "out"_a.noconvert());
+    m.def("xdoppler_pd", &xdoppler_pd, nb::call_guard<nb::gil_scoped_release>(), "iq"_a.noconvert(), "out"_a.noconvert(), "rc_start"_a, "rc_count"_a, "cr_start"_a, "cr_count"_a);
+    m.def("rc_fmas_pd", &rc_fmas_pd, nb::call_guard<nb::gil_scoped_release>(), "iq"_a.noconvert(), "out"_a.noconvert(), "rc_start"_a, "rc_count"_a, "cr_start"_a, "cr_count"_a);
     m.def(
         "delay_rca_channels",
         &delay_rca_channels,
+        nb::call_guard<nb::gil_scoped_release>(),
         "iq_ch"_a.noconvert(),
         "scan_coords_m"_a.noconvert(),
         "elements_m"_a.noconvert(),
@@ -618,24 +594,9 @@ NB_MODULE(_cuda_impl, m) {
         "f_number"_a
     );
     m.def(
-        "opw_ensemble_pd_from_channels",
-        &opw_ensemble_pd_from_channels,
-        "iq_rc"_a.noconvert(),
-        "iq_cr"_a.noconvert(),
-        "scan_coords_m"_a.noconvert(),
-        "x_elements_m"_a.noconvert(),
-        "y_elements_m"_a.noconvert(),
-        "angles_rad"_a.noconvert(),
-        "t_start_s"_a.noconvert(),
-        "out"_a.noconvert(),
-        "sound_speed_m_s"_a,
-        "sampling_freq_hz"_a,
-        "demod_freq_hz"_a,
-        "f_number"_a
-    );
-    m.def(
         "fast_pd_from_channels",
         &fast_pd_from_channels,
+        nb::call_guard<nb::gil_scoped_release>(),
         "iq_rc"_a.noconvert(),
         "iq_cr"_a.noconvert(),
         "scan_coords_m"_a.noconvert(),
@@ -654,6 +615,7 @@ NB_MODULE(_cuda_impl, m) {
     m.def(
         "dmas_ccf_acf_from_channels",
         &dmas_ccf_acf_from_channels,
+        nb::call_guard<nb::gil_scoped_release>(),
         "iq_rc"_a.noconvert(),
         "iq_cr"_a.noconvert(),
         "scan_coords_m"_a.noconvert(),
@@ -670,6 +632,7 @@ NB_MODULE(_cuda_impl, m) {
     m.def(
         "opw_pd_from_channels",
         &opw_pd_from_channels,
+        nb::call_guard<nb::gil_scoped_release>(),
         "iq_rc"_a.noconvert(),
         "iq_cr"_a.noconvert(),
         "scan_coords_m"_a.noconvert(),
@@ -686,6 +649,7 @@ NB_MODULE(_cuda_impl, m) {
     m.def(
         "xdoppler_pd_from_channels",
         &xdoppler_pd_from_channels,
+        nb::call_guard<nb::gil_scoped_release>(),
         "iq_rc"_a.noconvert(),
         "iq_cr"_a.noconvert(),
         "scan_coords_m"_a.noconvert(),
@@ -702,6 +666,7 @@ NB_MODULE(_cuda_impl, m) {
     m.def(
         "rc_fmas_pd_from_channels",
         &rc_fmas_pd_from_channels,
+        nb::call_guard<nb::gil_scoped_release>(),
         "iq_rc"_a.noconvert(),
         "iq_cr"_a.noconvert(),
         "scan_coords_m"_a.noconvert(),
@@ -733,6 +698,7 @@ NB_MODULE(_cuda_impl, m) {
     m.def(
         "delay_rca_channel_data",
         &delay_rca_channel_data,
+        nb::call_guard<nb::gil_scoped_release>(),
         "iq_ch"_a.noconvert(),
         "scan_coords_m"_a.noconvert(),
         "elements_m"_a.noconvert(),

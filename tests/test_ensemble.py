@@ -5,6 +5,7 @@ import pytest
 
 from rcabeam import RCAGeometry, beamform_ensemble, ensemble_pd_from_channels
 from rcabeam.dmas import dmas_ccf_acf_core
+from rcabeam.ensemble import EnsembleTiming
 from rcabeam.fmas import rc_fmas
 from rcabeam.opw import opw_numpy
 from rcabeam.sim import delay_rca_channel_data
@@ -37,11 +38,16 @@ def test_batched_methods(frames: int, fnumber: float | None) -> None:
     ri, qi = np.arange(4), np.arange(4, 8)
     signals = {"opw": opw_numpy(iq), "xdoppler": xdoppler_signal(iq, ri, qi), "rc_fmas": rc_fmas(iq, ri, qi)}
     for method, expected in signals.items():
-        actual = beamform_ensemble(rc, cr, angles, starts, grid, geom, method=method)
+        metrics: EnsembleTiming = {"raw_upload_seconds": -1.0}
+        actual = beamform_ensemble(rc, cr, angles, starts, grid, geom, method=method, timings=metrics)
+        assert np.isfinite(metrics["raw_upload_seconds"]) and metrics["raw_upload_seconds"] > 0
         np.testing.assert_allclose(actual, expected, rtol=5e-4, atol=5e-4)
         power = np.abs(expected.mean(axis=-1)) if method == "xdoppler" else np.mean(np.abs(expected) ** 2, axis=-1)
         np.testing.assert_allclose(
-            ensemble_pd_from_channels(rc, cr, angles, starts, grid, geom, method=method), power, rtol=5e-4, atol=5e-4
+            ensemble_pd_from_channels(rc, cr, angles, starts, grid, geom, method=method, timings=metrics),
+            power,
+            rtol=5e-4,
+            atol=5e-4,
         )
     np.testing.assert_allclose(
         ensemble_pd_from_channels(rc, cr, angles, starts, grid, geom, method="dmas"),

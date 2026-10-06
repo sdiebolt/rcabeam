@@ -35,6 +35,21 @@ def test_dmas_core_shapes_and_finiteness() -> None:
         assert np.all(np.isfinite(arr))
 
 
+def test_dmas_scalar_and_single_channel() -> None:
+    """Single-channel and single-voxel reference outputs remain finite arrays."""
+    np.testing.assert_array_equal(dmas_bruteforce(np.ones((3, 1), np.complex64)), np.zeros(3))
+    for value in (0, 1):
+        signal = np.full(2, value, dtype=np.complex64)
+        for actual, expected in zip(
+            dmas_ccf_acf_core(signal, signal, signal, signal),
+            dmas_ccf_acf_core(signal[None], signal[None], signal[None], signal[None]),
+            strict=True,
+        ):
+            assert isinstance(actual, np.ndarray) and actual.shape == ()
+            assert np.isfinite(actual).all()
+            np.testing.assert_allclose(actual, expected[0])
+
+
 def test_delay_channel_data_matches_angle_sum() -> None:
     """Delayed per-angle output matches existing DAS helper."""
     f0 = 6e6

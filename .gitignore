@@ -6,6 +6,9 @@ __pycache__/
 *.py[cod]
 *.so
 
+# Local research PDFs, not package sources.
+/*.pdf
+
 # Generated example/profile outputs
 *.png
 *.nsys-rep

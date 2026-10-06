@@ -22,7 +22,7 @@ def dmas_bruteforce(s: np.ndarray) -> np.ndarray:
         Real DMAS response with shape `(...)`.
     """
     st = signed_sqrt(s)
-    out = 0
+    out = np.zeros(s.shape[:-1], dtype=st.dtype)
     for i in range(s.shape[-1] - 1):
         for j in range(i + 1, s.shape[-1]):
             out = out + st[..., i] * np.conj(st[..., j]) + st[..., j] * np.conj(st[..., i])
@@ -78,9 +78,11 @@ def dmas_ccf_acf_core(
     with np.errstate(divide="ignore", invalid="ignore"):
         w_acf = num / den
 
-    for arr in (y_dmas, w_ccf, w_acf):
-        arr[~np.isfinite(arr)] = 0
-    return y_dmas, w_ccf, w_acf
+    return (
+        np.where(np.isfinite(y_dmas), y_dmas, 0),
+        np.where(np.isfinite(w_ccf), w_ccf, 0),
+        np.where(np.isfinite(w_acf), w_acf, 0),
+    )
 
 
 def dmas_ccf_acf_frame(

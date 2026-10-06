@@ -87,7 +87,7 @@ def test_opw_tile_boundary(frames: int) -> None:
     )
 
 
-@pytest.mark.parametrize("frames", [2, 64, 66])
+@pytest.mark.parametrize("frames", [2, 8, 64, 66])
 @pytest.mark.parametrize("channels", [1, 17])
 def test_opw_cooperative_tails(frames: int, channels: int) -> None:
     """Vector loads handle channel tails, odd voxel counts, and partial frame batches."""

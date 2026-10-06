@@ -7,7 +7,9 @@ import numpy as np
 from rcabeam.xdoppler import xdoppler_pd
 
 
-def st_sw_weights(iq: np.ndarray, rc_idx: np.ndarray, cr_idx: np.ndarray, *, k: int = 4, z_chunk: int = 16) -> np.ndarray:
+def st_sw_weights(
+    iq: np.ndarray, rc_idx: np.ndarray, cr_idx: np.ndarray, *, k: int = 4, z_chunk: int = 16
+) -> np.ndarray:
     """Compute spatial-temporal similarity weights.
 
     Parameters

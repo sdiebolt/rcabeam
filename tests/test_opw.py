@@ -27,8 +27,12 @@ def test_synthetic_point_peaks_near_target() -> None:
     z = np.linspace(11.7e-3, 12.3e-3, 9)
     y = np.linspace(-0.6e-3, 0.6e-3, 9)
 
-    rc = delay_rca_channels(simulate_point(geom, angles, point, nsamp, t_start, "RC"), angles, t_start, (x, z, y), geom, "RC")
-    cr = delay_rca_channels(simulate_point(geom, angles, point, nsamp, t_start, "CR"), angles, t_start, (x, z, y), geom, "CR")
+    rc = delay_rca_channels(
+        simulate_point(geom, angles, point, nsamp, t_start, "RC"), angles, t_start, (x, z, y), geom, "RC"
+    )
+    cr = delay_rca_channels(
+        simulate_point(geom, angles, point, nsamp, t_start, "CR"), angles, t_start, (x, z, y), geom, "CR"
+    )
     iq = np.concatenate([rc, cr], axis=-1)[..., None]
     pd = np.abs(opw(iq)[..., 0]) ** 2
     peak = np.unravel_index(np.argmax(pd), pd.shape)

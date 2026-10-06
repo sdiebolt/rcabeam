@@ -189,46 +189,6 @@ __device__ __forceinline__ float2 delay_sample(
   return cmul(val, make_float2(co, s));
 }
 
-__device__ __forceinline__ float2 delay_sample_frame(
-    const float2 *iq_ch, const float *scan_coords, const float *elements,
-    const float *angles, const float *t_start, size_t n_samples,
-    size_t n_channels, size_t n_angles, size_t n_frames, size_t voxel,
-    size_t ch, size_t angle, size_t frame, int config, float c, float fs,
-    float f_demod, float f_number) {
-  float x = scan_coords[3 * voxel + 0];
-  float z = scan_coords[3 * voxel + 1];
-  float y = scan_coords[3 * voxel + 2];
-  float theta = angles[angle];
-  float u_tx = config == 0 ? y : x;
-  float v_rx = config == 0 ? x : y;
-  float dv = v_rx - elements[ch];
-  if (f_number > 0.0f && fabsf(dv) > z / (2.0f * f_number))
-    return make_float2(0.0f, 0.0f);
-  float tau_tx = (z * cosf(theta) + u_tx * sinf(theta)) / c;
-  float tau = tau_tx + sqrtf(z * z + dv * dv) / c;
-  float sample = (tau - t_start[angle]) * fs;
-  int i0 = static_cast<int>(floorf(sample));
-  if (i0 < 0 || i0 >= static_cast<int>(n_samples) - 1)
-    return make_float2(0.0f, 0.0f);
-  float w = sample - static_cast<float>(i0);
-  size_t idx0 =
-      (((static_cast<size_t>(i0) * n_channels + ch) * n_angles + angle) *
-       n_frames) +
-      frame;
-  size_t idx1 =
-      (((static_cast<size_t>(i0 + 1) * n_channels + ch) * n_angles + angle) *
-       n_frames) +
-      frame;
-  float2 a = iq_ch[idx0];
-  float2 b = iq_ch[idx1];
-  float2 val =
-      make_float2((1.0f - w) * a.x + w * b.x, (1.0f - w) * a.y + w * b.y);
-  float ph = 2.0f * CUDART_PI_F * f_demod * tau;
-  float s, co;
-  sincosf(ph, &s, &co);
-  return cmul(val, make_float2(co, s));
-}
-
 __global__ void delay_rca_channels_kernel(
     const float2 *iq_ch, const float *scan_coords, const float *elements,
     const float *angles, const float *t_start, float2 *out, size_t n_samples,
@@ -685,58 +645,6 @@ rcabeam_status rcabeam_dmas_ccf_acf_from_channels_device(
       static_cast<const float2 *>(iq_rc), static_cast<const float2 *>(iq_cr),
       scan_coords_m, x_elements_m, y_elements_m, angles_rad, t_start_s, out,
       n_samples, n_channels, n_angles, n_voxels, sound_speed_m_s,
-      sampling_freq_hz, demod_freq_hz, f_number);
-  return launch_status();
-}
-
-__global__ void opw_ensemble_pd_from_channels_kernel(
-    const float2 *iq_rc, const float2 *iq_cr, const float *scan_coords,
-    const float *x_elements, const float *y_elements, const float *angles,
-    const float *t_start, float *out, size_t n_samples, size_t n_channels,
-    size_t n_angles, size_t n_frames, size_t n_voxels, float c, float fs,
-    float f_demod, float f_number) {
-  size_t i = blockIdx.x * blockDim.x + threadIdx.x;
-  size_t n = n_voxels * n_frames;
-  if (i >= n)
-    return;
-  size_t voxel = i / n_frames;
-  size_t frame = i - voxel * n_frames;
-  float2 acc = make_float2(0.0f, 0.0f);
-  for (size_t angle = 0; angle < n_angles; ++angle) {
-    for (size_t ch = 0; ch < n_channels; ++ch) {
-      acc = cadd(acc, delay_sample_frame(iq_rc, scan_coords, x_elements, angles,
-                                         t_start, n_samples, n_channels,
-                                         n_angles, n_frames, voxel, ch, angle,
-                                         frame, 0, c, fs, f_demod, f_number));
-      acc = cadd(acc, delay_sample_frame(iq_cr, scan_coords, y_elements, angles,
-                                         t_start, n_samples, n_channels,
-                                         n_angles, n_frames, voxel, ch, angle,
-                                         frame, 1, c, fs, f_demod, f_number));
-    }
-  }
-  atomicAdd(&out[voxel], cabs2(acc) / static_cast<float>(n_frames));
-}
-
-rcabeam_status rcabeam_opw_ensemble_pd_from_channels_device(
-    const void *iq_rc, const void *iq_cr, const float *scan_coords_m,
-    const float *x_elements_m, const float *y_elements_m,
-    const float *angles_rad, const float *t_start_s, float *out,
-    size_t n_samples, size_t n_channels, size_t n_angles, size_t n_frames,
-    size_t n_voxels, float sound_speed_m_s, float sampling_freq_hz,
-    float demod_freq_hz, float f_number) {
-  if (invalid_delay_args(iq_rc, scan_coords_m, x_elements_m, angles_rad,
-                         t_start_s, out, n_samples, n_channels, n_angles,
-                         n_voxels, 0))
-    return RCABEAM_ERROR_ARGUMENT;
-  if (iq_cr == nullptr || y_elements_m == nullptr || n_frames == 0)
-    return RCABEAM_ERROR_ARGUMENT;
-  cudaMemset(out, 0, n_voxels * sizeof(float));
-  int threads = 128;
-  int blocks = static_cast<int>((n_voxels * n_frames + threads - 1) / threads);
-  opw_ensemble_pd_from_channels_kernel<<<blocks, threads>>>(
-      static_cast<const float2 *>(iq_rc), static_cast<const float2 *>(iq_cr),
-      scan_coords_m, x_elements_m, y_elements_m, angles_rad, t_start_s, out,
-      n_samples, n_channels, n_angles, n_frames, n_voxels, sound_speed_m_s,
       sampling_freq_hz, demod_freq_hz, f_number);
   return launch_status();
 }

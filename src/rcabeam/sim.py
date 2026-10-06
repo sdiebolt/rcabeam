@@ -37,6 +37,46 @@ class RCAGeometry:
     fnumber: float | None = 1.0
 
 
+def depth_axis(
+    start: float, stop: float, frequency: float, *, sound_speed: float = 1540.0, spacing: float | None = None
+) -> NDArray[np.float64]:
+    """Build a depth axis including both endpoints, with lambda/2 default spacing.
+
+    Parameters
+    ----------
+    start, stop
+        Nonnegative minimum and maximum depths in meters, in increasing order.
+    frequency
+        Positive center frequency in Hz.
+    sound_speed
+        Positive sound speed in meters per second.
+    spacing
+        Optional positive maximum spacing in meters. Defaults to half wavelength.
+
+    Returns
+    -------
+    np.ndarray
+        Uniform float64 depths, with spacing no larger than the requested limit.
+
+    Raises
+    ------
+    ValueError
+        Bounds, frequency, sound speed, or spacing are invalid.
+    """
+    if (
+        not np.isfinite([start, stop, frequency, sound_speed]).all()
+        or start < 0
+        or stop < start
+        or min(frequency, sound_speed) <= 0
+    ):
+        raise ValueError("Require finite ordered nonnegative depths and positive frequency/sound speed")
+    step = sound_speed / (2 * frequency) if spacing is None else spacing
+    if not np.isfinite(step) or step <= 0:
+        raise ValueError("Depth spacing must be finite and positive")
+    intervals = int(np.ceil((stop - start) / step))
+    return np.linspace(start, stop, intervals + 1)
+
+
 def sample_bandlimited_pulse(
     delays: NDArray[np.float32 | np.float64], nsamp: int, t_start: float, fs: float, bandwidth_hz: float
 ) -> NDArray[np.float64]:

@@ -102,10 +102,12 @@ def main() -> None:
             translate=(7.5, -1, -1),
             colormap="gray",
         )
+        if isinstance(layer, list):
+            raise TypeError("Expected a single image layer")
         layer.name_overlay.visible = True
         layer.name_overlay.gridded = True
-    viewer.grid.enabled = True
-    viewer.grid.shape = (1, 3)
+    viewer.canvas.grid.enabled = True
+    viewer.canvas.grid.shape = (1, 3)
     viewer.dims.order = (1, 0, 2)
     viewer.dims.set_current_step(1, 40)
     napari.run()
