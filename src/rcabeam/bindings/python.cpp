@@ -568,8 +568,97 @@ double ensemble_from_channels(
     return raw_upload_seconds;
 }
 
+template <typename Array>
+static void require_current_device(Array array, int device) {
+    if (array.device_type() != nb::device::cuda::value)
+        throw std::invalid_argument("resident buffers must be CUDA arrays");
+    cudaPointerAttributes attributes{};
+    check_cuda(cudaPointerGetAttributes(&attributes, array.data()));
+    if (attributes.type != cudaMemoryTypeDevice || attributes.device != device)
+        throw std::invalid_argument("resident buffers must belong to the current CUDA device");
+}
+
+void pack_opw_channels(
+    nb::ndarray<const std::complex<float>, nb::ndim<4>, nb::c_contig> rc,
+    nb::ndarray<const std::complex<float>, nb::ndim<4>, nb::c_contig> cr,
+    nb::ndarray<unsigned char, nb::ndim<1>, nb::c_contig> packed_rc,
+    nb::ndarray<unsigned char, nb::ndim<1>, nb::c_contig> packed_cr,
+    nb::ndarray<int, nb::ndim<1>, nb::c_contig> range_error, bool half_storage
+) {
+    size_t ns=rc.shape(0), nc=rc.shape(1), na=rc.shape(2), nt=rc.shape(3);
+    if (ns<2 || !nc || !na || !nt || ns>SIZE_MAX/nc/na/nt/8)
+        throw std::invalid_argument("invalid channel dimensions");
+    for (size_t axis=0; axis<4; ++axis)
+        if (rc.shape(axis)!=cr.shape(axis)) throw std::invalid_argument("RC/CR shapes must match");
+    size_t bytes=rc.nbytes()/(half_storage ? 2:1);
+    if (packed_rc.nbytes()!=bytes || packed_cr.nbytes()!=bytes || range_error.size()!=1)
+        throw std::invalid_argument("invalid packed buffer sizes");
+    int device; check_cuda(cudaGetDevice(&device));
+    require_current_device(rc,device); require_current_device(cr,device);
+    require_current_device(packed_rc,device); require_current_device(packed_cr,device);
+    require_current_device(range_error,device);
+    if (half_storage) {
+        check_cuda(cudaMemset(range_error.data(),0,sizeof(int)));
+        check_status(rcabeam_pack_ensemble_fp16_device(rc.data(),packed_rc.data(),range_error.data(),ns,nc,na,nt));
+        check_status(rcabeam_pack_ensemble_fp16_device(cr.data(),packed_cr.data(),range_error.data(),ns,nc,na,nt));
+        int invalid=0;
+        check_cuda(cudaMemcpy(&invalid,range_error.data(),sizeof(int),cudaMemcpyDeviceToHost));
+        if (invalid) throw std::invalid_argument("FP16 IQ requires finite components within +/-65504; rescale inputs explicitly");
+    } else {
+        check_status(rcabeam_pack_ensemble_device(rc.data(),packed_rc.data(),ns,nc,na,nt));
+        check_status(rcabeam_pack_ensemble_device(cr.data(),packed_cr.data(),ns,nc,na,nt));
+    }
+    check_cuda(cudaStreamSynchronize(nullptr));
+}
+
+void opw_from_packed(
+    nb::ndarray<const unsigned char, nb::ndim<1>, nb::c_contig> rc,
+    nb::ndarray<const unsigned char, nb::ndim<1>, nb::c_contig> cr,
+    nb::ndarray<const float, nb::shape<-1,3>, nb::c_contig> scan,
+    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> xe,
+    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> ye,
+    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> angles,
+    nb::ndarray<const float, nb::ndim<1>, nb::c_contig> starts,
+    nb::ndarray<float, nb::shape<-1,2>, nb::c_contig> pd,
+    nb::ndarray<std::complex<float>, nb::ndim<2>, nb::c_contig> signal,
+    nb::ndarray<unsigned char, nb::ndim<1>, nb::c_contig> geometry_workspace,
+    size_t ns, size_t nc, size_t na, size_t nt,
+    float c, float fs, float fd, float fn, bool half_storage
+) {
+    size_t nv=scan.shape(0), tile=nv<16384 ? nv:16384;
+    if (ns<2 || !nc || !na || !nt || !nv || ns>SIZE_MAX/nc/na/nt/8)
+        throw std::invalid_argument("invalid packed dimensions");
+    size_t bytes=ns*nc*na*nt*(half_storage ? 4:8);
+    if (rc.nbytes()!=bytes || cr.nbytes()!=bytes || xe.size()!=nc || ye.size()!=nc ||
+        angles.size()!=na || starts.size()!=na || pd.shape(0)!=nv ||
+        signal.shape(0)!=nv || signal.shape(1)!=nt || geometry_workspace.nbytes()!=2*tile*(nc+na)*sizeof(float4))
+        throw std::invalid_argument("invalid resident buffer shapes");
+    int device; check_cuda(cudaGetDevice(&device));
+    require_current_device(rc,device); require_current_device(cr,device);
+    require_current_device(scan,device); require_current_device(xe,device); require_current_device(ye,device);
+    require_current_device(angles,device); require_current_device(starts,device);
+    require_current_device(pd,device); require_current_device(signal,device); require_current_device(geometry_workspace,device);
+    for (size_t start=0; start<nv; start+=tile) {
+        size_t count=nv-start<tile ? nv-start:tile;
+        if (half_storage) {
+            check_status(rcabeam_opw_fp16_device(rc.data(),cr.data(),scan.data()+3*start,xe.data(),ye.data(),angles.data(),starts.data(),pd.data()+2*start,signal.data()+start*nt,geometry_workspace.data(),ns,nc,na,nt,count,c,fs,fd,fn));
+        } else {
+            check_status(rcabeam_ensemble_device(rc.data(),cr.data(),scan.data()+3*start,xe.data(),ye.data(),angles.data(),starts.data(),pd.data()+2*start,signal.data()+start*nt,nullptr,nullptr,geometry_workspace.data(),ns,nc,na,nt,count,c,fs,fd,fn,0,2));
+        }
+    }
+    check_cuda(cudaStreamSynchronize(nullptr));
+}
+
 NB_MODULE(_cuda_impl, m) {
     m.doc() = "Python bindings for the rcabeam CUDA core";
+    m.def("pack_opw_channels", &pack_opw_channels, nb::call_guard<nb::gil_scoped_release>(),
+        "rc"_a.noconvert(), "cr"_a.noconvert(), "packed_rc"_a.noconvert(), "packed_cr"_a.noconvert(),
+        "range_error"_a.noconvert(), "half_storage"_a);
+    m.def("opw_from_packed", &opw_from_packed, nb::call_guard<nb::gil_scoped_release>(),
+        "rc"_a.noconvert(), "cr"_a.noconvert(), "scan"_a.noconvert(), "xe"_a.noconvert(), "ye"_a.noconvert(),
+        "angles"_a.noconvert(), "starts"_a.noconvert(), "pd"_a.noconvert(), "signal"_a.noconvert(),
+        "geometry_workspace"_a.noconvert(), "ns"_a, "nc"_a, "na"_a, "nt"_a,
+        "c"_a, "fs"_a, "fd"_a, "fn"_a, "half_storage"_a);
     m.def("ensemble_from_channels", &ensemble_from_channels, nb::call_guard<nb::gil_scoped_release>(),
         "rc"_a.noconvert(), "cr"_a.noconvert(), "scan"_a.noconvert(), "xe"_a.noconvert(), "ye"_a.noconvert(),
         "angles"_a.noconvert(), "starts"_a.noconvert(), "pd"_a.noconvert(), "signal"_a.noconvert(), "weights"_a.noconvert(),

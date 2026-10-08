@@ -79,6 +79,53 @@ need more repetitions and an idle, thermally stable GPU. The tuner uses one
 synthetic target with the same DAS access pattern.
 Agent experiment results and rejected approaches: [ROADMAP.md](ROADMAP.md).
 
+### Matched mach/ffdas comparison
+
+`examples/compare_matrix_backends.py` uses identical five-target complex64
+channels, F-number 1 rectangular aperture, five coherently compounded waves,
+and canonical GPU IQ for both libraries. It validates every trial against an
+independent float64 NumPy reference before reporting randomized/interleaved
+medians. Resident timing includes input permutations and GPU output restoration;
+`power`/`iq` additionally include warmed allocation requests, raw/metadata H2D
+and output D2H. Power is unfiltered and retains full IQ first, unlike the
+streaming power-only benchmark above.
+
+Install rcabeam, CuPy, mach and a source-built ffdas in a separate Python 3.12+
+environment; ffdas does not support the project's usual Python 3.11 environment.
+Build its core in an external build directory for the actual GPU architecture,
+without modifying that checkout, and set `FFDAS_LIB_DIR` to its library directory.
+For example, after installation into `/tmp/rcabeam-fpm-env`:
+
+```bash
+FFDAS_LIB_DIR=/path/to/ffdas/lib LD_LIBRARY_PATH=/path/to/ffdas/lib \
+  uv run --no-project --python /tmp/rcabeam-fpm-env/bin/python \
+  python examples/compare_matrix_backends.py --repeat 3
+```
+
+This ffdas revision has ALG2 local-accumulator overruns for small calls and
+calls larger than its kernel tile. The harness requires 64-frame ALG2 calls,
+zero-pads the final remainder, counts that work, and exports only actual frames.
+ALG2's `fp32` path still quantizes fractional interpolation weights to FP16;
+`fp16` also converts/interpolates samples in FP16. ALG4 uses TF32 or FP16 tensor
+arithmetic with FP32 output. These are not all-FP32 equivalents.
+
+The independent process monitor rejects overlapping compute workers without
+stopping them. Desktop activity and host memory/I/O pressure remain limitations.
+See [ROADMAP.md](ROADMAP.md) for validated measurements and discarded unsafe runs.
+
+`examples/benchmark_ffdas_paper.py` isolates the paper-like single-wave TC
+benchmark: 1024 receivers, 128 frames, 256 IQ samples, native GPU output and
+ffdas CUDA-event timing, including internal permutation/conversion but no host
+transfers or canonical output restoration. Run it in the same isolated
+environment, with `--geometry table` or `--geometry example`.
+The former uses the published 128³ grid and λ/2 spacing; the latter keeps the
+public example's fixed field of view while increasing its grid to 128³.
+The paper does not publish grid origin, IQ sampling ratio or receive cutoff;
+these are explicitly borrowed from the public example, so neither run is an
+exact reproduction. Inputs are deterministic random IQ: the paper states
+geometry, not simulation fidelity, determines the DAS access pattern.
+Unsafe 128-frame ALG2 calls are not benchmarked here.
+
 S4 uses 300 µm FPM pitch by default (`--matrix-pitch` overrides it), retains
 physical strip coordinates, and combines all sector/angle IQ before power.
 Two-repeat averaging is assumed upstream: 40 physical firings become 20
@@ -121,6 +168,44 @@ The default remains `float32`. Nonlinear methods do not accept FP16 storage.
 
 The direct reductions are **unfiltered**. Clutter filtering and subsequent power
 estimation are separate steps; these benchmarks are not a complete fUSI pipeline.
+
+## GPU-resident OPW
+
+Install CuPy with `uv sync --extra gpu --group dev` (also included by `matrix`).
+The existing allocating NumPy API is unchanged.
+
+```python
+import cupy as cp
+from rcabeam.gpu import OpwWorkspace
+
+workspace = OpwWorkspace(
+    rc.shape, angles, t_start, grid, geom,
+    iq_storage="float32", spatial_order=True,
+)
+rc_gpu, cr_gpu = cp.asarray(rc), cp.asarray(cr)  # Explicit raw H2D, once here.
+workspace.pack(rc_gpu, cr_gpu)                 # Copy into owned packed buffers.
+iq_gpu = workspace.reconstruct()              # No output D2H; reuse for GPU processing.
+power_gpu = workspace.power                   # Unfiltered power, not clutter-filtered PD.
+```
+
+For the next ensemble, update the raw GPU arrays and call `pack` again.
+`reconstruct` can reuse the current packed data. IQ and power are borrowed
+outputs overwritten by reconstruction; copy them when retaining a result.
+The workspace snapshots geometry and owns packed samples/scratch/output;
+create another workspace when shapes or geometry change. Operations are
+synchronous, serialized per workspace, and require its device/default CUDA
+stream. Failed packing disables reconstruction and power access.
+
+`spatial_order=True` restores canonical `(x, z, y, frames)` output on the GPU,
+without the slower host permutation. It costs an extra full IQ buffer
+(**1.61 GB** by default), so canonical traversal remains the workspace default.
+`iq_storage="float16"` retains the existing explicit range/loss limitations.
+Hardware FP16 **RF** output, including the noted Vantage NXT ingress option,
+is distinct from demodulated complex IQ: RF conversion, scaling and actual
+hardware DMA remain unimplemented/unvalidated here. This API accepts complex64
+GPU IQ and optionally stores its packed representation as FP16.
+
+Resident and complete transfer-path measurements: [ROADMAP.md](ROADMAP.md).
 
 ## Limitations and integration
 
