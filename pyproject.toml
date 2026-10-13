@@ -29,6 +29,13 @@ minimum-version = "build-system.requires"
 build-dir = "build/{wheel_tag}"
 wheel.packages = ["src/rcabeam"]
 
+[tool.scikit-build.cmake.define]
+CMAKE_EXPORT_COMPILE_COMMANDS = true
+
+[tool.uv]
+# Keep build-header paths in .venv so clangd can use them after the build.
+no-build-isolation-package = ["rcabeam"]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 120
