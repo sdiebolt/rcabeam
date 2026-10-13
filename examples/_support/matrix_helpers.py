@@ -1,10 +1,4 @@
-"""Fully populated matrix-array reference using mach.
-
-Run from the rcabeam repo root:
-    uv run --extra matrix python examples/matrix_reference.py
-
-This is a reference, not RCA: a dense 2D receive aperture with compounded plane waves.
-"""
+"""Shared FPM simulation, geometry and reference DAS for benchmarks/viewing."""
 
 from __future__ import annotations
 
@@ -124,59 +118,3 @@ def _matrix_das_compound(
         )
         out += np.asarray(bf[:, 0])
     return out
-
-
-def main() -> None:
-    """Generate a dense matrix-array reference image with mach."""
-    f0 = 15e6
-    c = 1540.0
-    from rcabeam.sim import depth_axis
-
-    fs = 4 * f0 / 3
-    pitch = 0.1e-3
-    n_side = 32
-    n_grid = 94
-    nsamp = int(np.ceil(((1100 - 1) / 60e6) * fs)) + 1
-    t_start = 2e-6
-    scatterers = [
-        ((0.0, 8.0e-3, 0.0), 1.0),
-        ((-2.2e-3, 6.0e-3, 1.8e-3), 0.8),
-        ((2.0e-3, 9.5e-3, -1.5e-3), 0.7),
-        ((-1.2e-3, 11.2e-3, -2.4e-3), 0.6),
-        ((2.6e-3, 7.2e-3, 2.5e-3), 0.5),
-    ]
-    x = (np.arange(n_grid) - (n_grid - 1) / 2) * 96e-6
-    z = depth_axis(4e-3, 12e-3, f0, sound_speed=c)
-    y = x.copy()
-
-    rx_coords = _matrix_positions(n_side, pitch)
-    scan = _scan_grid(x, z, y)
-    steering = np.deg2rad(np.array([[0, 0], [-3, 0], [3, 0], [0, -3], [0, 3]]))
-
-    print(f"matrix probe: {n_side} x {n_side} = {len(rx_coords)} receive elements")
-    print(f"angles: {len(steering)} plane waves (0°, ±3° x/y)")
-    print(f"grid: {len(x)} x {len(z)} x {len(y)} = {len(scan):,} voxels")
-
-    volume = (
-        np.abs(
-            _matrix_das_compound(
-                rx_coords,
-                scan,
-                scatterers,
-                steering=steering,
-                nsamp=nsamp,
-                t_start=t_start,
-                fs=fs,
-                f0=f0,
-                c=c,
-                bandwidth_hz=f0,
-            ).reshape((len(x), len(z), len(y)))
-        )
-        ** 2
-    )
-    peak = np.unravel_index(np.argmax(volume), volume.shape)
-    print(f"peak index: {peak}, coords: {(x[peak[0]] * 1e3, z[peak[1]] * 1e3, y[peak[2]] * 1e3)} mm")
-
-
-if __name__ == "__main__":
-    main()

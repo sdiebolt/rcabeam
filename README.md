@@ -34,9 +34,10 @@ uv run python examples/benchmark.py --no-matrix --method opw --iq-storage float1
 # All methods plus the FPM comparison.
 uv run --extra matrix python examples/benchmark.py
 
-# Point-target images and fractional-delay interpolation comparison.
-uv run python examples/volume_point_target.py --napari --fast
-uv run python examples/interpolation_comparison.py --napari
+# One napari entry point: RCA methods, two-stage OPW, or interpolation.
+uv run python examples/visualize.py rca --fast
+uv run --extra gpu python examples/visualize.py two-stage
+uv run python examples/visualize.py interpolation
 
 # Acquisition storage and throughput estimates.
 uv run python examples/storage_estimate.py
@@ -45,13 +46,21 @@ uv run python examples/storage_estimate.py
 uv run --extra matrix python examples/benchmark.py --matrix-sequence s4 --method opw
 
 # Tune FPM chunks on this GPU; add --iq to tune IQ export separately.
-uv run --extra matrix python examples/tune_matrix_chunks.py
-uv run --extra matrix python examples/tune_matrix_chunks.py --sequence s4
+uv run --extra matrix python examples/benchmark.py matrix-chunks
+uv run --extra matrix python examples/benchmark.py matrix-chunks --sequence s4
 ```
 
-Use each script's `--help` for grid, angles, ensemble length, and sampling options.
+Only `benchmark.py`, `visualize.py`, and `storage_estimate.py` are entry points;
+`examples/_support/` contains shared implementation, not standalone scripts.
+Benchmark suites are `rca` (default), `two-stage`, `matrix-backends`, `ffdas-paper`,
+and `matrix-chunks`. Existing `benchmark.py --no-matrix ...` commands still work.
+Use `benchmark.py SUITE --help` or `visualize.py COMPARISON --help` for options.
+Visualization opens napari immediately after reconstruction—no timing trials or
+PSF sweeps. Add `--headless` for a compute-only check. Comparable OPW/interpolation
+layers share a reference scale; nonlinear RCA methods retain per-method
+normalization because their output units/scales differ.
 
-Defaults: **15 MHz, 80+80 RCA elements, 16 RC + 16 CR angles, 200 frames**.
+RCA benchmark defaults: **15 MHz, 80+80 RCA elements, 16 RC + 16 CR angles, 200 frames**.
 All methods use **4–12 mm depth and lambda/2 maximum axial spacing**:
 **80×80×157 RCA** and **94×94×157 FPM** points (x/y/z) at 15 MHz.
 FPM retains **32×32 receivers, 96 µm lateral spacing, and five waves
@@ -60,10 +69,10 @@ probe physics or acquired dataset. IQ uses **20 MS/s, 15 MHz full −6 dB
 bandwidth, and at least 368 samples**, extending the receive window when needed.
 Override depth with `--min-depth`, `--max-depth`, `--depth-step`; FPM lateral
 geometry uses `--matrix-grid X Y` and `--matrix-spacing`. The volume viewer uses
-matched RCA/FPM axes for visual comparison; the standalone FPM reference uses
-the benchmark's lateral grid. Storage defaults use these grids and float32 PD.
+matched RCA/FPM axes for visual comparison. Storage defaults use the benchmark
+grids and float32 PD.
 
-Timings exclude simulation but include allocations, transfers, packing, and
+RCA-suite timings exclude simulation but include allocations, transfers, packing, and
 reconstruction/reduction. These are different acquisitions, not a controlled
 image-quality comparison. Each full result also reports measured
 raw H2D wall time from that same run; this is not a Verasonics GPU-DMA
@@ -81,7 +90,7 @@ Agent experiment results and rejected approaches: [ROADMAP.md](ROADMAP.md).
 
 ### Matched mach/ffdas comparison
 
-`examples/compare_matrix_backends.py` uses identical five-target complex64
+`examples/benchmark.py matrix-backends` uses identical five-target complex64
 channels, F-number 1 rectangular aperture, five coherently compounded waves,
 and canonical GPU IQ for both libraries. It validates every trial against an
 independent float64 NumPy reference before reporting randomized/interleaved
@@ -99,7 +108,7 @@ For example, after installation into `/tmp/rcabeam-fpm-env`:
 ```bash
 FFDAS_LIB_DIR=/path/to/ffdas/lib LD_LIBRARY_PATH=/path/to/ffdas/lib \
   uv run --no-project --python /tmp/rcabeam-fpm-env/bin/python \
-  python examples/compare_matrix_backends.py --repeat 3
+  python examples/benchmark.py matrix-backends --repeat 3
 ```
 
 This ffdas revision has ALG2 local-accumulator overruns for small calls and
@@ -113,7 +122,7 @@ The independent process monitor rejects overlapping compute workers without
 stopping them. Desktop activity and host memory/I/O pressure remain limitations.
 See [ROADMAP.md](ROADMAP.md) for validated measurements and discarded unsafe runs.
 
-`examples/benchmark_ffdas_paper.py` isolates the paper-like single-wave TC
+`examples/benchmark.py ffdas-paper` isolates the paper-like single-wave TC
 benchmark: 1024 receivers, 128 frames, 256 IQ samples, native GPU output and
 ffdas CUDA-event timing, including internal permutation/conversion but no host
 transfers or canonical output restoration. Run it in the same isolated
@@ -206,6 +215,53 @@ hardware DMA remain unimplemented/unvalidated here. This API accepts complex64
 GPU IQ and optionally stores its packed representation as FP16.
 
 Resident and complete transfer-path measurements: [ROADMAP.md](ROADMAP.md).
+
+## Experimental two-stage OPW
+
+An opt-in prototype of Jørgensen et al., *Row–Column Beamformer for Fast
+Volumetric Imaging* (2023), beamforms dense per-emission reference planes and
+expands them using the plane-wave trajectory and not-a-knot cubic splines.
+It keeps the current linear channel interpolation and FP32/complex64 arithmetic;
+this is not an exact reproduction of the paper's cubic channel interpolation.
+Reference planes are centered in the lateral FoV and depth-padded for all angles.
+Frame chunks bound plane/spline scratch; final canonical IQ is retained.
+The conventional OPW APIs and defaults are unchanged.
+
+```bash
+uv run --extra gpu python examples/benchmark.py two-stage
+# Napari reconstructs one frame; no benchmark trials or PSF sweeps.
+uv run --extra gpu python examples/visualize.py two-stage
+# Smaller benchmark smoke run; default axial grid/depth/frequency are retained.
+uv run --extra gpu python examples/benchmark.py two-stage --grid 12 --elements 12 --angles 3 --frames 7 --repeat 1 --density 8
+```
+
+The benchmark prints randomized/interleaved resident and preallocated host-IQ
+round-trip timings against the existing spatial FP32 workspace, a sampling-density
+sweep, complex/amplitude/power/phase errors, and fine single-target PSF axis traces.
+Resident includes both stages and spline solves; round-trip adds raw H2D,
+conventional packing, and full IQ D2H. Setup, JIT, simulation, and validation
+are excluded; GPU worker monitoring rejects overlapping compute jobs.
+Full-volume quality uses frame zero of the five-target common-phase ensemble;
+this is not a moving-blood or clutter-filtered validation.
+`visualize.py two-stage` opens frame-zero conventional and two-stage volumes
+side by side in 3-D MIP view, with physical millimeter coordinates and a shared
+conventional reference dB scale. Switch to 2-D in napari to inspect slices; adjust
+the contrast floor below -40 dB to examine sidelobes. Add `--density 8` to show
+only the fastest prototype, or `--headless` to reconstruct without a window.
+One frame suffices for this common-phase synthetic scene; benchmark timings
+still use the requested ensemble length.
+
+GPU callers can import `TwoStageOpwWorkspace` from `rcabeam.two_stage` and call
+`reconstruct(rc_gpu, cr_gpu)` with contiguous raw complex64 ensembles. Geometry
+is snapshotted; calls are synchronous, serialized, and require the construction
+device/default stream. Returned IQ is borrowed and overwritten on reuse.
+`two_stage_opw_numpy` supplies a small-data correctness reference.
+
+**Do not substitute this for conventional OPW yet.** The initial default run
+was about **2.28× faster resident (550 vs 1253 ms)**, but whole-volume complex-IQ
+RMS error was about **21%** and off-axis lateral PSFs widened by up to **10%**.
+Increasing plane sampling did not remove that discrepancy. This approximation
+needs further quality work, not just kernel tuning. Details: [ROADMAP.md](ROADMAP.md).
 
 ## Limitations and integration
 

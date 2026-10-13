@@ -201,7 +201,7 @@ prevent a Python monitor thread from observing overlaps. Nsight Systems is
 available; Nsight Compute counters remain permission-blocked. Earlier unsafe
 ALG2 profiling timings are not retained as performance evidence.
 
-Reproduce with `examples/compare_matrix_backends.py`. Local accepted log:
+Reproduce with `examples/benchmark.py matrix-backends`. Local accepted log:
 `/tmp/rcabeam-fpm-safe-three-trials.log`; sanitizer:
 `/tmp/rcabeam-fpm-safe-memcheck.log`. Earlier unsafe/overlapped logs are retained
 locally only to diagnose the rejection, not to support throughput claims.
@@ -210,7 +210,7 @@ tests, generated images, PDF, external source edits or commits were added.
 
 ## Paper-like single-observation TC checkpoint
 
-A closer comparison uses `examples/benchmark_ffdas_paper.py`: 1024 receivers,
+A closer comparison uses `examples/benchmark.py ffdas-paper`: 1024 receivers,
 128-frame batch, Q=1, K=256 complex64 IQ samples, λ receiver pitch, native
 batch-first GPU output and ffdas's CUDA-event timer. Internal permutation,
 FP16 conversion and warmed output allocation requests are included; H2D,
@@ -332,3 +332,157 @@ Local artifacts: `/tmp/rcabeam-current-{fp32,fp16}-center30.ncu-repz`,
 - Profile genuine asynchronous loading or shorter accumulation chains before
   introducing another pipeline or changing interpolation precision.
 - Validate FP16 storage on acquired data; reserve H200 for final validation.
+
+## Experimental paper-inspired two-stage OPW checkpoint
+
+Implemented an opt-in `rcabeam.two_stage` prototype, not a replacement for the
+retained OPW kernel. Stage 1 beamforms one centered, depth-padded reference plane
+per angle/orientation; Stage 2 applies the plane-wave mapping and coherently sums
+not-a-knot cubic-spline interpolants. Wavelength uses `geom.f_demod` (assumed to
+match the carrier). Our positive transmit-sine convention gives
+`z_ref = z + (elevation - reference_elevation) * tan(theta/2)`.
+The current linear fast-time interpolation is retained, whereas the paper used
+cubic interpolation in channel DAS. All samples, spline work and outputs remain
+FP32/complex64. No spatial transmit apodization was added to our OPW model.
+
+`TwoStageOpwWorkspace` accepts raw resident IQ without packing, owns canonical
+IQ and plane/spline scratch, and snapshots geometry. Synchronous default-stream,
+device and input-layout guards and serialized calls are explicit. The borrowed
+output is overwritten on reconstruction. Thirty-two-frame chunks bound scratch;
+there is no persistent all-frame/all-angle plane volume or FP16 prototype.
+Conventional APIs, exports and defaults are unchanged.
+
+### Matched default workload: five interleaved trials per method/mode/density
+
+RTX 5080 Laptop, unchanged 80 W cap, 368 samples, 80+80 receivers, 16+16 waves,
+200 frames, 80x80x157 output, 15 MHz carrier/full bandwidth, 20 MS/s IQ, F-number 1.
+Five targets and common slow-time phase modulation match `benchmark.py`.
+Baseline is the retained **FP32 spatial workspace with GPU canonical restoration**.
+Trials were randomized within each density/mode and monitored independently for
+foreign compute workers; no overlaps were detected. Known desktop GPU apps,
+including Slack, are allowed but remain interference sources. The shared monitor
+can now be imported without requiring ffdas/mach; those imports are deferred until
+FPM reconstruction. No external source or power/security settings were changed.
+
+| Plane samples/lambda | Reference depths | Scratch GB | Resident conventional / prototype | Speedup | Host round-trip conventional / prototype | Speedup |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 8 | 672 | 0.881 | 1253.12 / 549.98 ms | 2.28x | 1683.62 / 963.59 ms | 1.75x |
+| 16 | 1339 | 1.755 | 1238.68 / 959.55 ms | 1.29x | 1746.98 / 1400.91 ms | 1.25x |
+| 32 | 2673 | 3.504 | 1207.28 / 1571.38 ms | 0.77x | 1629.14 / 1975.29 ms | 0.82x |
+
+Scratch is planes plus spline second derivatives, excluding the 1.61 GB IQ output
+and 1.51 GB raw input. Resident counts dense DAS, spline solves and expansion.
+Host round-trip updates preallocated raw GPU arrays, packs conventional inputs,
+reconstructs and downloads all IQ into preallocated host output. One-time setup,
+JIT, simulation and validation are excluded. Prototype reconstruction avoids
+packing; that is correctly counted as a pipeline difference. Timings are not the
+allocating power-only benchmark or a complete fUSI pipeline. Host transfer costs
+in this run are higher than earlier runs; do not compare those as a regression.
+Desktop activity, changing clocks and host memory pressure qualify the results.
+Combined per-mode telemetry medians were approximately 1545-1807 MHz, 56.6-74.4 W
+and 60-67 C; individual trial variation is retained in the JSON log.
+
+### Quality is not sufficient to promote
+
+Full-volume errors below compare frame-zero complex IQ against conventional OPW.
+Other frames share a global phase, so their unfiltered power has the same spatial
+error. These are synthetic metrics, not acquired weak-flow validation.
+
+| Plane samples/lambda | Complex relative RMS | Peak-normalized max IQ error | Amplitude relative RMS | Unfiltered power relative RMS | Bright phase RMS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 8 | 21.03% | 5.37% | 13.27% | 8.21% | 0.0819 rad |
+| 16 | 20.70% | 4.84% | 12.78% | 4.62% | 0.0827 rad |
+| 32 | 20.70% | 4.84% | 12.78% | 4.60% | 0.0828 rad |
+
+Bright phase metrics use conventional amplitude above 10% of its peak.
+The persistent discrepancy at 16/32 samples/lambda is evidence that interpolation
+density alone cannot fix this configuration. Complex RMS includes sidelobes and
+cancellation regions, so it should not be interpreted as 21% peak-amplitude loss.
+
+Independent fine single-target axis traces keep the reference planes at x=y=0
+by including the FoV endpoints. Targets: centered at 4.5 mm, (x,y)=(3,-3) mm at
+4.5 mm, and (2.6,2.5) mm at 11.5 mm. At density 8, off-axis lateral FWHM increased
+7.70-9.87%, with FWTM increases up to 4.95%. At density 16, off-axis lateral FWHM
+still increased 7.02-9.15%; density 32 did not materially improve those cases.
+Axial interpolation artifacts mostly improved with density. Thus the paper's
+reported <=1.19% width change does **not** transfer to our current acquisition,
+receive-aperture model and shallow FoV. No amplitude correction, extra reference
+planes or change in apodization was slipped into the prototype to mask that result.
+
+A separate single-reconstruction Nsight Systems diagnostic at density 8 attributes
+283.67 ms to dense DAS planes, 217.99 ms to expansion, and 21.87 ms to spline solves.
+This profiled run is not another throughput trial. Both reconstruction stages need
+optimization for further speed; spline solving is not the main cost. The 400 ms
+resident target remains unmet, even before considering quality/clutter filtering.
+
+### Proof and reproduction
+
+- NumPy prototype reuses existing channel DAS; spline algebra agrees with an
+  independent SciPy `CubicSpline` reference.
+- Tests cover the mapping sign, exact normal-incidence geometry, physical moving
+  target lag phase in the exact closest-element case, odd layouts, frame/chunk
+  tails, two-sample receive-window boundaries, snapshots and input/stream guards.
+- Conventional benchmark output is checked at targets/random/boundary voxels
+  against independent NumPy DAS. Timed outputs are finite and frame-zero repeat
+  checks are outside timing. Common-phase slow-time checks include target voxels
+  and frame boundaries, but do not validate arbitrary flow ensembles.
+- 90 library tests pass. Focused prototype CUDA memcheck/synccheck/racecheck report
+  zero errors/hazards. Targeted Python lint/format/type checks pass; wheel build
+  includes both prototype `.py` and RawModule `.cu` sources. Broader type checking
+  still encounters existing native-extension resolution/test typing issues, and
+  whole-tree formatting flags the pre-existing README workspace snippet.
+
+Reproduce with `uv run --extra gpu python examples/benchmark.py two-stage`.
+Default output includes the 8/16/32 density sweep, all individual timings, quality
+metrics, telemetry and single-target axis diagnostics. Local initial logs:
+`/tmp/rcabeam-two-stage-default.log`, `/tmp/rcabeam-two-stage-psf.log`,
+`/tmp/rcabeam-two-stage-{memcheck,synccheck,racecheck}.log`, and
+`/tmp/rcabeam-two-stage-profile.nsys-rep` / `-stages.csv`.
+No PDFs, generated images or commits were added.
+
+**Stop condition reached:** there is a measurable speed gain, but quality is worse
+than the paper's reported equivalence. Keep this opt-in. Next work should first
+investigate the receive-aperture/trajectory approximation (potentially bounded
+multiple reference planes), not promote it or assume denser sampling solves it.
+
+## Example consolidation checkpoint
+
+Only three top-level entry points remain: `examples/benchmark.py`,
+`examples/visualize.py`, and unchanged `examples/storage_estimate.py`.
+Internal modules under `_support/` retain the scientific implementations rather
+than adding standalone scripts or moving example orchestration into the library.
+The unused point-target demo and duplicated monolithic RCA reference were removed.
+
+Benchmark suites: `rca` (also accepts the original no-subcommand flags),
+`two-stage`, `matrix-backends`, `ffdas-paper`, and `matrix-chunks`.
+Each retains its existing timing boundary and best/median reporting convention;
+this consolidation does not make unlike timings directly comparable. ALG2 batch
+padding/guards, independent references, precision checks, and discarded-trial
+rules remain. The chunk tuner now uses the same independent process-based GPU
+monitor as the comparison suites, rather than its Python polling thread. Monitor
+failures abort; worker overlaps and allocation failures discard trials.
+
+Visualization comparisons: `rca`, `two-stage`, and `interpolation`. They share
+one napari renderer and physical `(z,y,x)` millimeter display coordinates.
+OPW/interpolation comparisons use a shared reference scale; nonlinear RCA outputs
+retain independent normalization because their units/scales differ. Signed DMAS
+responses are clipped to the display floor, not interpreted as conventional PD.
+`--headless` preserves a compute-only workflow. The two-stage viewer reconstructs
+one frame directly and does not run benchmark repetitions or PSF sweeps.
+
+The five-target list and channel simulation are shared. A pre/post small-scene
+check found bitwise-identical inputs; the two-stage benchmark's setup, quality
+metrics, and fine PSF diagnostics were exactly unchanged (timings excluded).
+Numerical library code was not changed during this cleanup.
+
+Validation: 108 tests pass; entry-point routing/help, shared-scene phase,
+monitor rejection/failure handling, and viewer reference scaling are covered.
+RCA all-method and `--full`/NumPy-reference smokes, two-stage resident,
+mach FPM/matched-backend, full/S4 chunk tuning, all three visualization modes,
+and storage estimates ran successfully. Actual napari layer construction was
+checked headlessly for all comparisons, including the optional FPM layer.
+Interactive rendering was not manually checked. Native ffdas execution was not
+rerun: its separate Python 3.12+ source-built environment is still required;
+its suite help and preserved source checks remain available. Targeted lint,
+format and type checks pass (type checking excludes unavailable native imports).
+README and historical reproduction commands now use the consolidated entry points.

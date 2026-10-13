@@ -19,9 +19,9 @@ from statistics import median
 from time import perf_counter
 
 import cupy as cp
-import ffdas
 import numpy as np
-from compare_matrix_backends import compute_workers, monitor_gpu
+
+from .gpu_monitor import compute_workers, monitor_gpu
 
 
 def _reference(data: np.ndarray, receivers: np.ndarray, points: np.ndarray) -> np.ndarray:
@@ -42,13 +42,15 @@ def _reference(data: np.ndarray, receivers: np.ndarray, points: np.ndarray) -> n
     return result
 
 
-def main() -> None:
+def main(argv=None) -> None:
     """Validate and time paper-sized TC calls without unsafe ALG2 batches or transfer costs."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--geometry", choices=("table", "example"), default="table")
     parser.add_argument("--grid", type=int, default=128)
     parser.add_argument("--repeat", type=int, default=5)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    import ffdas
+
     if args.grid < 2 or args.repeat < 1:
         parser.error("Grid must be at least two and repetition count positive")
     bus = cp.cuda.Device().pci_bus_id
@@ -153,7 +155,3 @@ def main() -> None:
             ),
             flush=True,
         )
-
-
-if __name__ == "__main__":
-    main()

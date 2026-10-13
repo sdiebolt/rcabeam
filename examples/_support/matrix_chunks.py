@@ -1,76 +1,25 @@
-"""Tune FPM chunks for this GPU and workload, without changing saved defaults.
+"""Tune FPM chunks without changing saved defaults.
 
-Run `uv run --no-sync python examples/tune_matrix_chunks.py` after installing
-`--extra matrix`. Use `--iq` to tune IQ export separately from power reduction.
+Use benchmark.py matrix-chunks --iq to tune IQ export separately from power.
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
-import os
 import random
-import subprocess
 from collections import defaultdict
-from pathlib import Path
 from statistics import median
-from threading import Event, Thread
 
 import cupy as cp
 import numpy as np
-from matrix_benchmark import benchmark_matrix_ensemble
 
 from rcabeam.sim import depth_axis
 
-
-def _workers(bus: str) -> set[int]:
-    """Find other compute processes, allowing known desktop GPU applications.
-
-    Parameters
-    ----------
-    bus
-        PCI bus ID of the selected GPU.
-
-    Returns
-    -------
-    set[int]
-        Other compute-worker process IDs.
-
-    Raises
-    ------
-    subprocess.CalledProcessError
-        GPU process inspection fails.
-    """
-    output = subprocess.check_output(
-        ["nvidia-smi", f"--id={bus}", "--query-compute-apps=pid,process_name", "--format=csv,noheader"],
-        text=True,
-    )
-    desktop = ("discord", "brave", "chrome", "firefox", "xorg", "kwin", "gnome-shell")
-    return {
-        int(pid)
-        for pid, name in csv.reader(output.splitlines())
-        if pid.strip().isdigit()
-        and int(pid) != os.getpid()
-        and not any(app in Path(name.strip().split(maxsplit=1)[0]).name.lower() for app in desktop)
-    }
+from .gpu_monitor import GPUWorkerOverlap, compute_workers, monitor_gpu
+from .matrix_benchmark import benchmark_matrix_ensemble
 
 
-def _observe(bus: str, stop: Event, workers: set[int], errors: list[Exception]) -> None:
-    """Poll for overlapping compute work throughout a trial.
-
-    Parameters
-    ----------
-    bus, stop, workers, errors
-        GPU bus ID, termination event, observed workers, and monitor errors.
-    """
-    try:
-        while not stop.wait(0.25):
-            workers.update(_workers(bus))
-    except (OSError, subprocess.SubprocessError, ValueError) as error:
-        errors.append(error)
-
-
-def main() -> None:
+def main(argv=None) -> None:
     """Report median full-pipeline timing and recommend an explicit chunk flag."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chunks", type=int, nargs="+", default=[16, 32, 64, 128, 200])
@@ -81,7 +30,7 @@ def main() -> None:
     parser.add_argument("--sequence", choices=("full", "s4"), default="full")
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--iq", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if min(*args.chunks, args.repeat, args.frames, args.grid, args.side) < 1 or args.device < 0:
         parser.error("dimensions, chunks and repetitions must be positive; device must be nonnegative")
     if args.sequence == "s4" and args.side % 4:
@@ -90,10 +39,9 @@ def main() -> None:
     pitch = 0.3e-3 if s4 else 0.1e-3
     cp.cuda.Device(args.device).use()
     bus = cp.cuda.Device().pci_bus_id
-    if _workers(bus):
+    if compute_workers(bus):
         parser.error("Another compute worker is using this GPU; try again when idle")
-    props = cp.cuda.runtime.getDeviceProperties(args.device)
-    name = props["name"]
+    name = cp.cuda.runtime.getDeviceProperties(args.device)["name"]
     if isinstance(name, bytes):
         name = name.decode(errors="replace")
     print(f"GPU: {name}; {bus}. Desktop activity, clocks and thermals can still affect results.")
@@ -119,44 +67,33 @@ def main() -> None:
     reference = None
     rng = random.Random(0)
     print(
-        f"{args.grid}x{args.grid}x{len(grid[1])}, {args.side**2 // (4 if s4 else 1)} receivers/firing, {20 if s4 else 5} sector/wave datasets ({args.sequence}), {args.frames} frames, {samples} IQ samples; {'IQ' if args.iq else 'power'} output."
+        f"{args.grid}x{args.grid}x{len(grid[1])}, {args.side**2 // (4 if s4 else 1)} receivers/firing, "
+        f"{20 if s4 else 5} sector/wave datasets ({args.sequence}), {args.frames} frames, {samples} IQ samples; "
+        f"{'IQ' if args.iq else 'power'} output."
     )
-    # Warm each shape to exclude lazy compilation, then randomize measured rounds.
     for round_index in range(-1, args.repeat):
         order = candidates.copy()
         rng.shuffle(order)
         for chunk in order:
-            workers = _workers(bus)
-            errors: list[Exception] = []
-            stop = Event()
-            monitor = Thread(target=_observe, args=(bus, stop, workers, errors), daemon=True)
-            monitor.start()
             try:
-                volume, elapsed, _, _ = benchmark_matrix_ensemble(
-                    grid,
-                    targets,
-                    side=args.side,
-                    steering=steering,
-                    frames=args.frames,
-                    pitch=pitch,
-                    nsamp=samples,
-                    t_start=2e-6,
-                    fs=20e6,
-                    f0=15e6,
-                    c=1540.0,
-                    return_iq=args.iq,
-                    frame_chunk=chunk,
-                    bandwidth_hz=15e6,
-                    sequence=args.sequence,
-                )
-                workers.update(_workers(bus))
-                stop.set()
-                monitor.join()
-                if errors:
-                    raise RuntimeError("GPU monitor failed") from errors[0]
-                if workers:
-                    print(f"round {round_index + 1}, chunk {chunk}: discarded, overlapping workers {workers}")
-                    continue
+                with monitor_gpu(bus):
+                    volume, elapsed, _, _ = benchmark_matrix_ensemble(
+                        grid,
+                        targets,
+                        side=args.side,
+                        steering=steering,
+                        frames=args.frames,
+                        pitch=pitch,
+                        nsamp=samples,
+                        t_start=2e-6,
+                        fs=20e6,
+                        f0=15e6,
+                        c=1540.0,
+                        return_iq=args.iq,
+                        frame_chunk=chunk,
+                        bandwidth_hz=15e6,
+                        sequence=args.sequence,
+                    )
                 if reference is None:
                     reference = volume.copy()
                 else:
@@ -166,11 +103,11 @@ def main() -> None:
                 else:
                     timings[chunk].append(elapsed)
                     print(f"round {round_index + 1}, chunk {chunk}: {elapsed * 1000:.2f} ms", flush=True)
+            except GPUWorkerOverlap as error:
+                print(f"round {round_index + 1}, chunk {chunk}: discarded, {error}")
             except cp.cuda.memory.OutOfMemoryError:
                 print(f"chunk {chunk}: out of GPU memory; skipped")
             finally:
-                stop.set()
-                monitor.join()
                 cp.get_default_memory_pool().free_all_blocks()
     complete = {chunk: values for chunk, values in timings.items() if len(values) == args.repeat}
     if not complete:
@@ -181,7 +118,3 @@ def main() -> None:
     best = min(complete, key=lambda chunk: median(complete[chunk]))
     print(f"\nRecommended for this GPU/workload/mode: --matrix-frame-chunk {best}")
     print("Close medians are inconclusive; rerun with --repeat 5. No defaults were modified.")
-
-
-if __name__ == "__main__":
-    main()

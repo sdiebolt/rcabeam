@@ -6,10 +6,11 @@ from time import perf_counter
 from typing import Literal
 
 import numpy as np
-from matrix_reference import _scan_grid, _simulate_matrix_iq, _tx_arrivals
 from numpy.typing import NDArray
 
 from rcabeam.matrix import matrix_apertures, plane_wave_tx_offset
+
+from .matrix_helpers import _scan_grid, _simulate_matrix_iq, _tx_arrivals
 
 
 def benchmark_matrix_ensemble(

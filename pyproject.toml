@@ -32,7 +32,7 @@ wheel.packages = ["src/rcabeam"]
 [tool.ruff]
 target-version = "py311"
 line-length = 120
-exclude = [".venv", "examples/reference_rca_beamformers.py"]
+exclude = [".venv"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "RUF"]

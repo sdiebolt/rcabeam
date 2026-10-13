@@ -1,6 +1,6 @@
 """Compare actual RCA images with aligned and half-sample acquisition clocks.
 
-Run `uv run python examples/interpolation_comparison.py --napari`.
+Run `uv run python examples/visualize.py interpolation`.
 All images share the oversampled reference's power scale. Only one anchor
 channel/angle is exactly aligned; other channels have their physical delays.
 """
@@ -8,12 +8,13 @@ channel/angle is exactly aligned; other channels have their physical delays.
 from __future__ import annotations
 
 import argparse
-import os
 
 import numpy as np
 from numpy.typing import NDArray
 
 from rcabeam import RCAGeometry, opw_pd_from_channels, simulate_point
+
+from .viewer import show_volumes
 
 
 def upsample_channels(channels: NDArray[np.complex64], factor: int) -> NDArray[np.complex64]:
@@ -48,11 +49,10 @@ def upsample_channels(channels: NDArray[np.complex64], factor: int) -> NDArray[n
     return (np.fft.ifft(np.fft.ifftshift(spectrum, axes=0), axis=0) * factor).astype(np.complex64)
 
 
-def main() -> None:
+def main(argv=None, *, show=True):
     """Compute shared-scale RCA point-spread images and optionally open napari."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--napari", action="store_true", help="Open the comparison in napari.")
-    args = parser.parse_args()
+    parser.parse_args(argv)
     fs, f0, c = 20e6, 15e6, 1540.0
     nsamp, factor = 400, 8
     el = (np.arange(80) - 39.5) * 0.1e-3
@@ -86,32 +86,13 @@ def main() -> None:
         print(f"{name}: target-center power {center_db:.3f} dB relative to reference")
     print("Only the anchor has delay fraction exactly 0 or 0.5. Others vary with geometry.")
     print("Reference: same 20 MS/s bandlimited waveform, Fourier-upsampled to 160 MS/s; still linear DAS.")
-    if not args.napari:
-        return
-    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
-    import napari
-
-    viewer = napari.Viewer(title="IQ delay interpolation — shared reference scale")
-    for name, volume in [("160 MS/s reference (same pulse)", reference), *volumes]:
-        db = 10 * np.log10(np.maximum(volume / reference_peak, 1e-8))
-        layer = viewer.add_image(
-            db.transpose(1, 2, 0),
-            name=name,
-            contrast_limits=(-40, 0),
-            scale=(0.0125, 0.025, 0.025),
-            translate=(7.5, -1, -1),
-            colormap="gray",
+    volumes = [("160 MS/s reference (same pulse)", reference), *volumes]
+    if show:
+        show_volumes(
+            volumes,
+            grid,
+            reference_peak=reference_peak,
+            title="IQ delay interpolation — shared reference scale",
+            ndisplay=2,
         )
-        if isinstance(layer, list):
-            raise TypeError("Expected a single image layer")
-        layer.name_overlay.visible = True
-        layer.name_overlay.gridded = True
-    viewer.canvas.grid.enabled = True
-    viewer.canvas.grid.shape = (1, 3)
-    viewer.dims.order = (1, 0, 2)
-    viewer.dims.set_current_step(1, 40)
-    napari.run()
-
-
-if __name__ == "__main__":
-    main()
+    return volumes, grid

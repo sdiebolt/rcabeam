@@ -11,98 +11,24 @@ accumulator overruns; padding, conversions and canonical restoration are timed.
 from __future__ import annotations
 
 import argparse
-import csv
 import json
-import os
 import random
-import subprocess
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from resource import RUSAGE_SELF, getrusage
 from statistics import median
-from tempfile import TemporaryFile
 from time import perf_counter
 
 import cupy as cp
-import ffdas
 import numpy as np
-from mach import beamform
-from matrix_reference import _matrix_positions, _scan_grid, _simulate_matrix_iq, _tx_arrivals
 
 from rcabeam.sim import depth_axis
 
+from .gpu_monitor import compute_workers, monitor_gpu
+from .matrix_helpers import _matrix_positions, _scan_grid, _simulate_matrix_iq, _tx_arrivals
+from .scene import TARGETS
+
 BACKENDS = ("mach", "alg2-fp32", "alg2-fp16", "alg4-tf32", "alg4-fp16")
 FS, F0, C, T0 = 20e6, 15e6, 1540.0, 2e-6
-
-
-def _worker_pids(text: str) -> set[int]:
-    """Parse foreign compute PIDs, allowing known desktop GPU applications."""
-    desktop = ("discord", "brave", "chrome", "firefox", "xorg", "kwin", "gnome-shell")
-    return {
-        int(pid)
-        for pid, name in csv.reader(text.splitlines())
-        if pid.strip().isdigit()
-        and int(pid) != os.getpid()
-        and not any(app in Path(name.strip().split(maxsplit=1)[0]).name.lower() for app in desktop)
-    }
-
-
-def compute_workers(bus: str) -> set[int]:
-    """Query foreign compute workers on the selected GPU."""
-    return _worker_pids(
-        subprocess.check_output(
-            ["nvidia-smi", f"--id={bus}", "--query-compute-apps=pid,process_name", "--format=csv,noheader"], text=True
-        )
-    )
-
-
-@contextmanager
-def monitor_gpu(bus: str) -> Iterator[list[list[float]]]:
-    """Monitor independently of Python's GIL; reject foreign workers or monitor failures."""
-    workers = compute_workers(bus)
-    if workers:
-        raise RuntimeError(f"GPU occupied by {workers}")
-    samples: list[list[float]] = []
-    queries = (
-        "--query-gpu=clocks.sm,power.draw,temperature.gpu,utilization.gpu",
-        "--query-compute-apps=pid,process_name",
-    )
-    with TemporaryFile() as stats, TemporaryFile() as apps:
-        processes: list[subprocess.Popen[bytes]] = []
-        try:
-            for query, log in zip(queries, (stats, apps), strict=True):
-                processes.append(
-                    subprocess.Popen(
-                        [
-                            "stdbuf",
-                            "-oL",
-                            "nvidia-smi",
-                            f"--id={bus}",
-                            query,
-                            "--format=csv,noheader,nounits",
-                            "--loop-ms=250",
-                        ],
-                        stdout=log,
-                        stderr=subprocess.PIPE,
-                    )
-                )
-            yield samples
-        finally:
-            errors = []
-            for process in processes:
-                if process.poll() is not None:
-                    errors.append(process.communicate()[1].decode())
-                else:
-                    process.terminate()
-                    process.communicate()
-            stats.seek(0)
-            samples.extend([float(value) for value in row] for row in csv.reader(stats.read().decode().splitlines()))
-            apps.seek(0)
-            workers.update(_worker_pids(apps.read().decode()))
-            workers.update(compute_workers(bus))
-            if workers or errors:
-                raise RuntimeError(f"Discarded contaminated trial: workers={workers}, monitor errors={errors}")
 
 
 def _reference(raw: np.ndarray, metadata: dict[str, np.ndarray], points: np.ndarray, frames: np.ndarray) -> np.ndarray:
@@ -148,6 +74,8 @@ def _reconstruct(
         last = min(first + chunk, data.shape[0])
         count = last - first
         if backend == "mach":
+            from mach import beamform
+
             part = output if count == data.shape[0] else scratch[: output.shape[0] * count].reshape((-1, count))
             part.fill(0)
             for wave in range(data.shape[2]):
@@ -168,6 +96,8 @@ def _reconstruct(
             if part is not output:
                 output[:, first:last] = part
         else:
+            import ffdas
+
             channels = data[first:last]
             padded_count = count
             if backend.startswith("alg2") and count < 64:
@@ -322,7 +252,7 @@ def _suite(
     return valid
 
 
-def main() -> None:
+def main(argv=None) -> None:
     """Build one common acquisition dataset and compare validated backends without changing defaults."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--grid", type=int, default=94)
@@ -333,7 +263,7 @@ def main() -> None:
     parser.add_argument("--repeat", type=int, default=5)
     parser.add_argument("--modes", nargs="+", choices=("resident", "power", "iq"), default=["resident", "power", "iq"])
     parser.add_argument("--backends", nargs="+", choices=BACKENDS, default=list(BACKENDS))
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if min(args.grid, args.side, args.frames, args.chunk, args.repeat) < 1:
         parser.error("All dimensions and counts must be positive")
     if args.chunk != 64 and any(backend.startswith("alg2") for backend in args.backends):
@@ -349,13 +279,7 @@ def main() -> None:
     radial_extent = max(abs(axis[0]), abs(axis[-1])) + (args.side - 1) * 0.1e-3 / 2
     receive_end = np.sqrt(12e-3**2 + 2 * radial_extent**2) / C
     samples = max(368, int(np.ceil((float(tx.max()) + receive_end + 4 / F0 - T0) * FS)) + 1)
-    targets = [
-        ((0.0, 8e-3, 0.0), 1.0),
-        ((-2.2e-3, 6e-3, 1.8e-3), 0.8),
-        ((2e-3, 9.5e-3, -1.5e-3), 0.7),
-        ((-1.2e-3, 11.2e-3, -2.4e-3), 0.6),
-        ((2.6e-3, 7.2e-3, 2.5e-3), 0.5),
-    ]
+    targets = TARGETS
     base = np.stack(
         [
             _simulate_matrix_iq(
@@ -431,7 +355,3 @@ def main() -> None:
         cp.get_default_memory_pool().free_all_blocks()
         if not backends:
             raise RuntimeError("No backend passed numerical validation")
-
-
-if __name__ == "__main__":
-    main()
