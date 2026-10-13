@@ -332,3 +332,53 @@ Local artifacts: `/tmp/rcabeam-current-{fp32,fp16}-center30.ncu-repz`,
 - Profile genuine asynchronous loading or shorter accumulation chains before
   introducing another pipeline or changing interpolation precision.
 - Validate FP16 storage on acquired data; reserve H200 for final validation.
+
+
+## Proposed next steps: fewer operations, filtered outputs
+
+The retained kernels already reach roughly 370 G delay-and-sums per second
+end-to-end (5.1e11 per 200-frame ensemble in about 1.38 s). That is the same order
+as the 1650 G/s reported by Præsius (PhD thesis, DTU 2025) on an RTX 4090 at
+600 W, so the remaining factor of about 3.5x is more likely to come from doing
+less work than from further kernel tuning. NumPy references for the steps below
+are in `rcabeam.two_stage` and `rcabeam.clutter`.
+
+1. **Two-stage beamforming (largest gain).**
+   - Stage 1 is the existing delay kernel on a `(lateral, z1, K planes)` grid
+     (`two_stage_rca_channels(..., use_cuda=True)` already uses it).
+   - Stage 2 needs one kernel: per voxel and angle, a 4-tap baseband interpolation
+     along `z` of the nearest plane, with one phase rotation before and after.
+     Weights and phases are frame-invariant, so the 64-frame batching and the
+     shared-coefficient tricks of the OPW kernel apply directly. The angle sum (OPW)
+     or the RC/CR sums (XDoppler) can be fused into it.
+   - Interpolation count per frame and aperture: 1.29e9 full versus 8.6e7 two-stage
+     (`K = 2`, 2x oversampling) or 1.55e8 (`K = 4`, 2x).
+2. **Clutter filter on the channel data.**
+   - The `(samples, channels, angles, frames)` layout is already a Casorati matrix
+     with frames innermost. The Gram matrix of the fast-time window is one cuBLAS
+     HERK; the `Nt x Nt` eigendecomposition is negligible.
+   - The projection `Y - (Y V_c) V_c^H` is two GEMMs that can be applied while
+     packing.
+   - The filtered ensemble then feeds the existing fused power-only reductions
+     unchanged.
+   - Estimated cost: a few tens of ms for 200 frames.
+3. **Realistic ingest.** Upload int16 RF and demodulate, matched-filter and decimate
+   on the GPU, as in Præsius' pre-processing kernel. Overlap uploads with compute
+   using streams.
+4. **Interpolation quality.** Use cubic (4-tap) interpolation or 2x IQ sampling in
+   stage 1, which the reduced operation count makes affordable. Linear interpolation
+   at 20 MS/s loses up to 22% amplitude.
+5. **Report throughput and efficiency** (delay-and-sums per second and fraction of
+   peak FP32), so that the end of kernel tuning is measurable.
+
+Validation (in rca-ultrafast, `benchmarks/two_stage_and_clutter_check.py`):
+- Two-stage accuracy against full DAS over the field.
+- A tissue-motion plus flow phantom comparing channel-domain, real-RF and
+  volume-domain SVD bases (vessel/tissue power Doppler contrast for OPW, XDoppler
+  and RC-FMAS).
+- Exact equality of channel-filtered and volume-filtered images.
+
+In that phantom, every basis reaches the same best vessel/tissue contrast within
+about 1 dB (OPW about 22 dB, XDoppler 23-25 dB, RC-FMAS 26-28 dB). The channel
+domain needs a larger cut-off (k = 5-7 instead of 3) and has a wider plateau.
+Beamforming the filtered channels matches filtering the volumes to 3e-5 (float32).
