@@ -207,6 +207,41 @@ GPU IQ and optionally stores its packed representation as FP16.
 
 Resident and complete transfer-path measurements: [ROADMAP.md](ROADMAP.md).
 
+## Two-stage beamforming and channel-domain clutter filtering
+
+NumPy references (CuPy-compatible clutter filter), validated on CPU; CUDA kernels
+are proposed in [ROADMAP.md](ROADMAP.md).
+
+```python
+import numpy as np
+
+from rcabeam import channel_clutter_filter, fast_time_window, two_stage_ensemble, xdoppler_pd
+
+# 1. One shared SVD basis for RC and CR, estimated on the imaged depths only.
+w_rc = fast_time_window(grid, geom, angles, t_start, rc.shape[0], "RC")
+w_cr = fast_time_window(grid, geom, angles, t_start, cr.shape[0], "CR")
+rc_f, cr_f, (s2, v) = channel_clutter_filter(rc, cr, n_cut=20, window_rc=w_rc, window_cr=w_cr)
+
+# 2. Two-stage plane-wave beamforming of the filtered channels.
+iq = two_stage_ensemble(rc_f, cr_f, angles, t_start, grid, geom, n_planes=2)
+m = len(angles)
+pd = xdoppler_pd(iq, np.arange(m), np.arange(m, 2 * m))
+```
+
+- **Channel-domain filtering is exact:** `beamform(channels @ P) == beamform(channels) @ P`
+  for any slow-time filter `P`. Every method, including XDoppler and the nonlinear ones,
+  then receives clutter-filtered data, and the fused power-only paths become valid fUS
+  outputs. `svd_power_doppler` and `rcabeam.clutter.pd_from_basis` give filtered power
+  Doppler as `||Y V_A||^2 / Nt` without forming the filtered data.
+- **Two-stage beamforming** beamforms `K` planes per emission (stage 1, existing DAS
+  kernel) and fills the volume by baseband depth-shift interpolation
+  `z' = z + (u - u_k) tan(theta / 2)` (stage 2). For the default 80+80 / 80x157x80
+  setup it needs 15x fewer interpolations with `K = 2` or `K = 4` without axial
+  oversampling, or 8x with `K = 4` and 2x oversampling. Against full DAS
+  (15 MHz, F-number 1, +-8 deg), the worst peak loss over the field is 4.5% with
+  `K = 2` and 1.5% with `K = 4`.
+- DMAS-CCF-ACF needs per-channel delayed data and does not benefit from two stages.
+
 ## Limitations and integration
 
 - Linear interpolation is retained. For the benchmark pulse, a half-sample delay
