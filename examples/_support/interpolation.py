@@ -1,6 +1,6 @@
 """Compare actual RCA images with aligned and half-sample acquisition clocks.
 
-Run `uv run python examples/visualize.py interpolation`.
+Run `PYTHONPATH=examples uv run python -m _support.interpolation`.
 All images share the oversampled reference's power scale. Only one anchor
 channel/angle is exactly aligned; other channels have their physical delays.
 """
@@ -96,3 +96,7 @@ def main(argv=None, *, show=True):
             ndisplay=2,
         )
     return volumes, grid
+
+
+if __name__ == "__main__":
+    main()

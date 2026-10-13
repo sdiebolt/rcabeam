@@ -29,24 +29,24 @@ def test_benchmark_rejects_selection_arguments(examples, args):
         importlib.import_module("benchmark").main(args)
 
 
-@pytest.mark.parametrize("comparison", ["rca", "two-stage", "interpolation"])
-def test_visualize_dispatch(examples, monkeypatch, comparison):
+@pytest.mark.parametrize("headless", [False, True])
+def test_visualize_runs_all_methods_without_selection(examples, monkeypatch, headless):
     entry = importlib.import_module("visualize")
     calls = []
-    names = []
 
-    def load(name):
-        names.append(name)
-        return SimpleNamespace(main=lambda argv, **kwargs: calls.append((argv, kwargs)))
+    def run(**kwargs):
+        calls.append(kwargs)
+        return "volumes", "grid"
 
-    monkeypatch.setattr(entry.importlib, "import_module", load)
-    entry.main([comparison, "--headless", "--help"])
-    assert names == [f"_support.{entry.COMPARISONS[comparison]}"]
-    assert calls == [(["--help"], {"show": False})]
-    entry.main([comparison, "--help"])
-    assert calls[-1] == (["--help"], {"show": True})
-    entry.main(["--headless", comparison, "--help"])
-    assert calls[-1] == (["--help"], {"show": False})
+    monkeypatch.setitem(sys.modules, "_support.rca_visualization", SimpleNamespace(main=run))
+    assert entry.main(["--headless"] if headless else []) == ("volumes", "grid")
+    assert calls == [{"show": not headless}]
+
+
+@pytest.mark.parametrize("args", [["rca"], ["two-stage"], ["interpolation"], ["--fast"]])
+def test_visualize_rejects_selection_arguments(examples, args):
+    with pytest.raises(SystemExit, match="2"):
+        importlib.import_module("visualize").main(args)
 
 
 @pytest.mark.parametrize("name", ["benchmark", "visualize"])
@@ -56,14 +56,9 @@ def test_entrypoint_help_and_invalid_selection(examples, monkeypatch, capsys, na
     def reject_import(name):
         raise AssertionError(f"Top-level help must not import optional suite {name}")
 
-    if name == "visualize":
-        monkeypatch.setattr(entry.importlib, "import_module", reject_import)
-    else:
-        monkeypatch.setitem(sys.modules, "_support.rca_benchmark", SimpleNamespace(main=reject_import))
-    if name == "benchmark":
-        with pytest.raises(SystemExit, match="0"):
-            entry.main(["--help"])
-    else:
+    module = "_support.rca_visualization" if name == "visualize" else "_support.rca_benchmark"
+    monkeypatch.setitem(sys.modules, module, SimpleNamespace(main=reject_import))
+    with pytest.raises(SystemExit, match="0"):
         entry.main(["--help"])
     assert "two-stage" in capsys.readouterr().out
     with pytest.raises(SystemExit, match="2"):
@@ -130,10 +125,8 @@ def test_gpu_monitor_detects_overlap_and_monitor_failure(examples, monkeypatch):
     "args", [["--grid", "0"], ["--frequency", "nan"], ["--matrix", "--matrix-side", "0"], ["--angles", "1"]]
 )
 def test_visualization_invalid_configuration(examples, args):
-    from _support.rca_visualization import main
-
     with pytest.raises(SystemExit, match="2"):
-        main(args, show=False)
+        importlib.import_module("visualize").main(args)
 
 
 def test_only_three_example_scripts():

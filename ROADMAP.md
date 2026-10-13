@@ -462,7 +462,8 @@ rules remain. The chunk tuner now uses the same independent process-based GPU
 monitor as the comparison suites, rather than its Python polling thread. Monitor
 failures abort; worker overlaps and allocation failures discard trials.
 
-Visualization comparisons: `rca`, `two-stage`, and `interpolation`. They share
+At this checkpoint visualization selected `rca`, `two-stage`, or `interpolation`;
+the no-selection viewer update below supersedes that CLI. They share
 one napari renderer and physical `(z,y,x)` millimeter display coordinates.
 OPW/interpolation comparisons use a shared reference scale; nonlinear RCA outputs
 retain independent normalization because their units/scales differ. Signed DMAS
@@ -528,3 +529,43 @@ complex-IQ power reduction and a small real-GPU all-method smoke. The complete
 default workload ran with mach FPM. Lint, changed-Python formatting, targeted
 typing and `git diff --check` pass. All five research-module help paths work;
 native ffdas execution and interactive napari rendering were not rerun.
+
+## All-method visualization
+
+`uv run examples/visualize.py` now reconstructs one frame of the same default
+five-target acquisition and opens every RCA method in one napari viewer:
+OPW, density-8 two-stage OPW, XDoppler, RC-FMAS, St-SW and DMAS-CCF-ACF.
+The shared method list, two-stage GPU power reduction and finite-volume checks
+are reused by the benchmark without changing its timing boundary. The viewer
+runs no timing trials or PSF sweeps. Suite, method and geometry arguments are
+removed; `--headless` remains for compute-only checks.
+
+Conventional and two-stage OPW share the conventional OPW peak. The renderer
+accepts a per-layer peak dictionary so nonlinear methods remain independently
+normalized in that same window; scalar shared-reference behavior for research
+comparisons is unchanged. Signed DMAS is clipped to the display floor, not
+squared. The two-stage layer explicitly labels the approximation. Physical
+millimeter axes and canonical-to-display `(x,z,y)` to `(z,y,x)` permutation remain.
+Six layers use a 2×3 grid; installed mach adds the five-wave 32×32 FPM reference
+on matched display axes and uses a 2×4 grid. Missing mach produces a skip notice.
+
+Interpolation and the 8/16/32 two-stage density viewer remain in research modules:
+`PYTHONPATH=examples uv run python -m _support.interpolation` and
+`PYTHONPATH=examples uv run python -m _support.two_stage_visualization`.
+The default viewer does not run these experiments. The conventional library
+APIs/defaults and two-stage kernels are unchanged.
+
+The full default headless run constructed seven finite volumes including mach
+FPM (`/tmp/rcabeam-all-methods-visualize.log`). An offscreen real-napari check
+constructed seven image layers, checked display dimensions/physical axes,
+2×4 grid and selective shared normalization
+(`/tmp/rcabeam-all-methods-napari.log`). Actual interactive rendering is not
+manually validated; offscreen Qt reports its expected OpenGL-widget limitation.
+Acquired-data/clutter-filtered two-stage quality remains unvalidated.
+
+Validation: 125 tests pass, including no-selection entry points, exactly one
+reconstruction per method, optional/missing FPM, finite-volume rejection,
+shared OPW versus independent nonlinear normalization, signed-response display,
+and a real-GPU all-method smoke. Lint, changed-Python formatting, targeted typing
+and `git diff --check` pass. Both research viewer module help paths work. The
+benchmark's existing numerical/timing tests still pass after sharing helpers.

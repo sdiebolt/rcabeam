@@ -5,7 +5,7 @@ Same five-target acquisition as benchmark.py. Timings exclude simulation, JIT,
 setup and quality checks. Resident includes dense planes, spline solves and
 canonical IQ expansion. Roundtrip adds raw H2D, conventional packing and full
 IQ D2H into preallocated host output. Neither path includes clutter filtering.
-Use visualize.py two-stage for a separate shared-scale napari comparison.
+Use visualize.py for the all-method viewer with a shared OPW/two-stage scale.
 """
 
 from __future__ import annotations

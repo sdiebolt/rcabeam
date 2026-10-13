@@ -12,17 +12,11 @@ from rcabeam import ensemble_pd_from_channels
 from rcabeam.sim import delay_rca_channels
 
 from .gpu_monitor import monitor_gpu
-from .scene import TARGETS, ensemble_scene
+from .scene import METHODS, TARGETS, ensemble_scene
+from .scene import check_volume as _check_volume
+from .scene import two_stage_power as _two_stage_power
 
 console = Console()
-METHODS = {
-    "opw": "OPW",
-    "two_stage": "Two-stage OPW",
-    "xdoppler": "XDoppler",
-    "rc_fmas": "RC-FMAS",
-    "st_sw": "St-SW",
-    "dmas": "DMAS-CCF-ACF",
-}
 REPEAT = 3
 
 
@@ -32,38 +26,6 @@ class Timing:
 
     total_ms: float
     upload_ms: float
-
-
-def _two_stage_power(raw, angles, grid, geom, timings):
-    """Allocate, upload, reconstruct and download unfiltered power like the native API."""
-    import cupy as cp
-
-    from rcabeam.two_stage import TwoStageOpwWorkspace
-
-    workspace = TwoStageOpwWorkspace(raw[0].shape, angles, 2e-6, grid, geom)
-    gpu = [cp.empty(v.shape, cp.complex64) for v in raw]
-    cp.cuda.Stream.null.synchronize()
-    start = perf_counter()
-    for device, host in zip(gpu, raw, strict=True):
-        device.set(host)
-    cp.cuda.Stream.null.synchronize()
-    timings["raw_upload_seconds"] = perf_counter() - start
-    iq = workspace.reconstruct(*gpu)
-    mean_power = cp.ReductionKernel(
-        "complex64 x",
-        "float32 y",
-        "x.real()*x.real()+x.imag()*x.imag()",
-        "a+b",
-        "y = a / (_in_ind.size() / _out_ind.size())",
-        "0",
-        "benchmark_mean_power",
-    )
-    return cp.asnumpy(mean_power(iq, axis=-1))
-
-
-def _check_volume(volume, shape):
-    if volume.shape != shape or not np.isfinite(volume).all():
-        raise ValueError("Expected a finite canonical (x, z, y) volume")
 
 
 def _check_opw(raw, angles, grid, geom, power):

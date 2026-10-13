@@ -47,6 +47,23 @@ def test_napari_shared_scale_and_coordinates(monkeypatch):
     assert viewer.dims.ndisplay == 3
     assert runs == [1]
 
+    # Only comparable OPW layers share a scale; nonlinear brightness is independent.
+    layers.clear()
+    example.show_volumes(
+        [
+            ("OPW", np.abs(reference) ** 2),
+            ("Two-stage", np.abs(reference / 2) ** 2),
+            ("Nonlinear", np.full(reference.shape, 100, np.float32)),
+            ("Signed DMAS", np.full(reference.shape, -1, np.float32)),
+        ],
+        grid,
+        reference_peak={"OPW": 4, "Two-stage": 4},
+    )
+    assert layers[0][0][2, 3, 1] == 0
+    np.testing.assert_allclose(layers[1][0][2, 3, 1], 20 * np.log10(0.5), atol=1e-6)
+    np.testing.assert_array_equal(layers[2][0], 0)
+    np.testing.assert_array_equal(layers[3][0], -80)  # Negative responses hit the floor, not bright power.
+
     # A zero reference and singleton axes must not introduce NaNs or zero scales.
     layers.clear()
     example.show_volumes([("Empty", np.zeros((1, 1, 1), np.float32))], tuple(np.zeros(1) for _ in range(3)))

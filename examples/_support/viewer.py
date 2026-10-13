@@ -10,6 +10,7 @@ def show_volumes(volumes, grid, *, reference_peak=None, title="RCA beamforming",
 
     Nonlinear methods have different output scales and remain independently
     normalized unless a shared reference is explicitly provided by the caller.
+    A name-to-peak dictionary shares a scale only for the specified layers.
     """
     os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
     import napari
@@ -19,7 +20,8 @@ def show_volumes(volumes, grid, *, reference_peak=None, title="RCA beamforming",
     translate = tuple(float(axis[0] * 1e3) for axis in axes)
     viewer = napari.Viewer(title=title)
     for name, volume in volumes:
-        peak = float(np.max(volume)) if reference_peak is None else reference_peak
+        peak = reference_peak.get(name) if isinstance(reference_peak, dict) else reference_peak
+        peak = float(np.max(volume)) if peak is None else peak
         peak = max(peak, np.finfo(np.float32).tiny)
         db = 10 * np.log10(np.maximum(volume / peak, 1e-8))
         layer = viewer.add_image(

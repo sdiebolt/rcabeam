@@ -1,124 +1,80 @@
-"""RCA point-target volumes, optionally with a matched-axis FPM reference."""
-
-from __future__ import annotations
-
-import argparse
+"""One shared acquisition, one frame, all methods; no benchmark trials or sweeps."""
 
 import numpy as np
+from rich.console import Console
 
-from rcabeam import (
-    RCAGeometry,
-    delay_rca_channels,
-    dmas_ccf_acf_frame,
-    fast_pd_from_channels,
-    opw,
-    power_doppler,
-    rc_fmas_pd,
-    st_sw_pd,
-    xdoppler_pd,
-)
-from rcabeam.sim import depth_axis
+from rcabeam import ensemble_pd_from_channels
 
-from .scene import TARGETS, simulate_channels
+from .scene import METHODS, TARGETS, check_volume, ensemble_scene, two_stage_power
 from .viewer import show_volumes
 
+console = Console()
 
-def main(argv=None, *, show=True):
-    """Generate a 3D RCA volume and optionally open napari."""
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--grid", type=int, default=80, help="RCA lateral points per x/y axis; axial spacing defaults to lambda/2."
+
+def _matrix_reference(grid, geom, nsamp):
+    """Reconstruct the optional five-wave FPM reference on matched display axes."""
+    try:
+        import mach  # noqa: F401
+    except ModuleNotFoundError as error:
+        if error.name != "mach":
+            raise
+        return None
+    from .matrix_helpers import _matrix_das_compound, _matrix_positions, _scan_grid
+
+    iq = _matrix_das_compound(
+        _matrix_positions(32, 0.1e-3),
+        _scan_grid(*grid),
+        TARGETS,
+        steering=np.deg2rad(np.array([[0, 0], [-3, 0], [3, 0], [0, -3], [0, 3]])),
+        nsamp=nsamp,
+        t_start=2e-6,
+        fs=geom.fs,
+        f0=geom.f_demod,
+        c=geom.c,
+        bandwidth_hz=15e6,
     )
-    parser.add_argument("--elements", type=int, default=80, help="RCA row/column elements per aperture.")
-    parser.add_argument("--angles", type=int, default=16, help="Plane waves per RC/CR aperture.")
-    parser.add_argument("--frequency", type=float, default=15e6, help="Center frequency in Hz.")
-    parser.add_argument("--pitch", type=float, default=0.1e-3, help="Element pitch in meters.")
-    parser.add_argument("--quality", action="store_true", help="Use 160 lateral points per RCA axis.")
-    parser.add_argument("--fast", action="store_true", help="Use fused channel→PD paths and skip St-SW/DMAS.")
-    parser.add_argument("--matrix", action="store_true", help="Add a dense matrix-array DAS reference layer in napari.")
-    parser.add_argument("--matrix-side", type=int, default=32, help="Dense matrix elements per side for --matrix.")
-    parser.add_argument(
-        "--matrix-waves", type=int, choices=(1, 5), default=5, help="FPM on-axis only or five waves at 0°, ±3° x/y."
-    )
-    args = parser.parse_args(argv)
-    if min(args.grid, args.elements, args.angles) < 1:
-        parser.error("Grid, elements and angles must be positive")
-    if not args.fast and args.angles < 2:
-        parser.error("St-SW needs at least two angles per aperture; use --fast for one angle")
-    if not np.isfinite([args.frequency, args.pitch]).all() or min(args.frequency, args.pitch) <= 0:
-        parser.error("Frequency and pitch must be positive and finite")
-    if args.matrix and args.matrix_side < 1:
-        parser.error("Matrix side must be positive")
+    return np.abs(iq.reshape(tuple(len(axis) for axis in grid))) ** 2
 
-    f0 = args.frequency
-    c = 1540.0
-    pitch = args.pitch
-    n_elements = args.elements
-    n_grid = 160 if args.quality else args.grid
-    el = (np.arange(n_elements) - (n_elements - 1) / 2) * pitch
-    geom = RCAGeometry(x_el=el, y_el=el, c=c, fs=4 * f0 / 3, f_demod=f0, fnumber=1.0)
 
-    n_angles = args.angles
-    angles = np.deg2rad(np.linspace(-8, 8, n_angles))
-    scatterers = TARGETS
-    t_start = 2e-6
-    nsamp = int(np.ceil(((1100 - 1) / 60e6) * geom.fs)) + 1
-    x = np.linspace(-4e-3, 4e-3, n_grid)
-    z = depth_axis(4e-3, 12e-3, f0, sound_speed=c)
-    y = np.linspace(-4e-3, 4e-3, n_grid)
-
-    rc_ch, cr_ch = simulate_channels(geom, angles, nsamp, t_start, f0)
-    grid = (x, z, y)
-    if args.fast:
-        opw_volume, xdoppler_volume, fmas_volume = fast_pd_from_channels(rc_ch, cr_ch, angles, t_start, grid, geom)
-        stsw_volume = None
-        dmas_volume = None
-        print("computed fast RCA volumes: fused OPW, fused XDoppler, fused RC-FMAS")
-    else:
-        rc = delay_rca_channels(rc_ch, angles, t_start, grid, geom, "RC")
-        cr = delay_rca_channels(cr_ch, angles, t_start, grid, geom, "CR")
-        iq = np.concatenate([rc, cr], axis=-1)[..., None]
-        rc_idx = np.arange(len(angles))
-        cr_idx = np.arange(len(angles), 2 * len(angles))
-        opw_volume = power_doppler(opw(iq))
-        xdoppler_volume = xdoppler_pd(iq, rc_idx, cr_idx)
-        fmas_volume = rc_fmas_pd(iq, rc_idx, cr_idx)
-        stsw_volume = st_sw_pd(iq, rc_idx, cr_idx, k=2)
-        dmas = dmas_ccf_acf_frame(rc_ch, cr_ch, angles, angles, t_start, t_start, grid, geom)
-        dmas_volume = dmas["dmas_ccf_acf"]
-        print("computed RCA volumes: OPW, XDoppler, RC-FMAS, St-SW, DMAS-CCF-ACF")
-
-    matrix_volume = None
-    if args.matrix:
-        from .matrix_helpers import _matrix_das_compound, _matrix_positions, _scan_grid
-
-        rx_coords = _matrix_positions(args.matrix_side, pitch)
-        scan = _scan_grid(x, z, y)
-        matrix_iq = _matrix_das_compound(
-            rx_coords,
-            scan,
-            scatterers,
-            steering=np.deg2rad(np.array([[0, 0], [-3, 0], [3, 0], [0, -3], [0, 3]])[: args.matrix_waves]),
-            nsamp=nsamp,
-            t_start=t_start,
-            fs=geom.fs,
-            f0=f0,
-            c=c,
-            bandwidth_hz=f0,
-        )
-        matrix_volume = np.abs(matrix_iq.reshape((len(x), len(z), len(y)))) ** 2
-        print("computed dense matrix reference volume")
+def main(*, show=True):
+    """Return finite canonical volumes and optionally open their comparison viewer."""
+    import cupy as cp
 
     volumes = []
-    if matrix_volume is not None:
-        volumes.append(
-            (f"Dense matrix DAS {args.matrix_side}x{args.matrix_side}, {args.matrix_waves} PW", matrix_volume)
-        )
-    volumes.extend([("OPW", opw_volume), ("XDoppler", xdoppler_volume), ("RC-FMAS", fmas_volume)])
-    if stsw_volume is not None:
-        volumes.append(("St-SW", stsw_volume))
-    if dmas_volume is not None:
-        volumes.append(("DMAS-CCF-ACF response", dmas_volume))
+    with console.status("Simulating shared acquisition…") as status:
+        raw, angles, grid, geom = ensemble_scene(80, 80, 16, 1)
+        shape = tuple(len(axis) for axis in grid)
+        for method, name in METHODS.items():
+            status.update(f"Reconstructing {name}…")
+            if method == "two_stage":
+                volume = two_stage_power(raw, angles, grid, geom)
+                name += " (approx., 8 samples/lambda)"
+            else:
+                volume = ensemble_pd_from_channels(raw[0], raw[1], angles, 2e-6, grid, geom, method=method)
+                if method == "dmas":
+                    name += " response"
+            check_volume(volume, shape)
+            volumes.append((name, volume))
+            cp.get_default_memory_pool().free_all_blocks()
+        status.update("Reconstructing FPM reference…")
+        matrix = _matrix_reference(grid, geom, raw[0].shape[0])
+        if matrix is not None:
+            check_volume(matrix, shape)
+            volumes.append(("mach FPM reference (32x32, 5 waves)", matrix))
+    if matrix is None:
+        console.print("[dim]FPM skipped: install the matrix extra to include it.[/dim]")
+    console.print(
+        f"Computed {len(volumes)} layers from one frame; no clutter filtering.\n"
+        "OPW/two-stage share the OPW scale; nonlinear/FPM layers normalize independently.\n"
+        "Signed DMAS responses are clipped to the display floor, not squared."
+    )
     if show:
-        show_volumes(volumes, grid, title="RCA beamformers — per-method normalization", grid_shape=(2, 3))
+        peak = float(volumes[0][1].max())
+        show_volumes(
+            volumes,
+            grid,
+            reference_peak={name: peak for name, _ in volumes[:2]},
+            title="RCA beamformers - OPW/two-stage shared scale",
+            grid_shape=(2, 4) if matrix is not None else (2, 3),
+        )
     return volumes, grid

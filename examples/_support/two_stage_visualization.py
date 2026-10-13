@@ -1,4 +1,7 @@
-"""One-frame conventional/two-stage OPW comparison, without benchmark trials."""
+"""Research density comparison: run as _support.two_stage_visualization.
+
+Use PYTHONPATH=examples. The everyday visualize.py already includes density 8.
+"""
 
 import argparse
 import gc
@@ -51,3 +54,7 @@ def main(argv=None, *, show=True):
             title="Two-stage OPW — shared conventional reference scale",
         )
     return volumes, grid
+
+
+if __name__ == "__main__":
+    main()

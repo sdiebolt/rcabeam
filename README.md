@@ -17,7 +17,8 @@ uv sync --group dev
 uv run pytest -q
 ```
 
-The all-method benchmark needs CuPy (CUDA 13): `uv sync --extra gpu --group dev`.
+The all-method benchmark and viewer need CuPy (CUDA 13):
+`uv sync --extra gpu --group dev`.
 Install the `matrix` extra instead to also include the fully populated matrix
 (FPM) reference: `uv sync --extra matrix --group dev`.
 For cross-compilation or GPU-less builds, explicitly select the target architecture
@@ -29,10 +30,10 @@ with `cmake.define.CMAKE_CUDA_ARCHITECTURES` when installing through `uv pip`.
 # Every RCA method, including two-stage OPW, in one Rich results table.
 uv run examples/benchmark.py
 
-# One napari entry point: RCA methods, two-stage OPW, or interpolation.
-uv run python examples/visualize.py rca --fast
-uv run python examples/visualize.py two-stage
-uv run python examples/visualize.py interpolation
+# Every RCA method in one napari viewer; FPM is included when installed.
+uv run examples/visualize.py
+# Reconstruct all layers without opening a window.
+uv run examples/visualize.py --headless
 
 # Acquisition storage and throughput estimates.
 uv run python examples/storage_estimate.py
@@ -48,11 +49,15 @@ in the table. Density/PSF sweeps and verbose JSON are not part of this command.
 
 Only `benchmark.py`, `visualize.py`, and `storage_estimate.py` are top-level
 scripts. Shared implementation and specialized research harnesses live under
-`examples/_support/`. Use `visualize.py COMPARISON --help` for viewer options.
-Visualization opens napari immediately after reconstruction—no timing trials or
-PSF sweeps. Add `--headless` for a compute-only check. Comparable OPW/interpolation
-layers share a reference scale; nonlinear RCA methods retain per-method
-normalization because their output units/scales differ.
+`examples/_support/`. The viewer also has no method or comparison selectors;
+its only operational option is `--headless` for a compute-only check.
+Visualization uses the same default acquisition but only one frame, then opens
+all six RCA layers in one napari window—no timing trials or PSF sweeps. Two-stage
+uses 8 samples/wavelength and is labeled approximate. OPW and two-stage share
+the conventional OPW reference scale; nonlinear RCA and FPM layers normalize
+independently because their output units/scales differ. Signed DMAS responses
+are clipped to the display floor, not squared. When installed, mach adds a
+seventh FPM layer on matched display axes; otherwise a skip notice is printed.
 
 RCA benchmark defaults: **15 MHz, 80+80 RCA elements, 16 RC + 16 CR angles, 200 frames**.
 All methods use **4–12 mm depth and lambda/2 maximum axial spacing**:
@@ -90,6 +95,10 @@ PYTHONPATH=examples uv run python -m _support.rca_diagnostics --matrix-sequence 
 # Tune FPM chunks; add --iq to tune IQ export separately.
 PYTHONPATH=examples uv run python -m _support.matrix_chunks
 PYTHONPATH=examples uv run python -m _support.matrix_chunks --sequence s4
+
+# Separate interpolation and two-stage density visualization experiments.
+PYTHONPATH=examples uv run python -m _support.interpolation
+PYTHONPATH=examples uv run python -m _support.two_stage_visualization
 ```
 
 The everyday benchmark also rejects overlapping compute workers. The chunk
@@ -244,7 +253,7 @@ The conventional OPW APIs and defaults are unchanged.
 # Two-stage is included alongside every other RCA method by default.
 uv run examples/benchmark.py
 # Napari reconstructs one frame; no benchmark trials or PSF sweeps.
-uv run python examples/visualize.py two-stage
+uv run examples/visualize.py
 # Optional research sweep, separate from the readable all-method table.
 PYTHONPATH=examples uv run python -m _support.two_stage_benchmark
 # Small research smoke run; default axial grid/depth/frequency are retained.
@@ -260,13 +269,15 @@ conventional packing, and full IQ D2H. Setup, JIT, simulation, and validation
 are excluded; GPU worker monitoring rejects overlapping compute jobs.
 Full-volume quality uses frame zero of the five-target common-phase ensemble;
 this is not a moving-blood or clutter-filtered validation.
-`visualize.py two-stage` opens frame-zero conventional and two-stage volumes
-side by side in 3-D MIP view, with physical millimeter coordinates and a shared
-conventional reference dB scale. Switch to 2-D in napari to inspect slices; adjust
-the contrast floor below -40 dB to examine sidelobes. Add `--density 8` to show
-only the fastest prototype, or `--headless` to reconstruct without a window.
-One frame suffices for this common-phase synthetic scene; benchmark timings
-still use the requested ensemble length.
+`visualize.py` includes frame-zero conventional and density-8 two-stage OPW
+alongside the other methods in 3-D MIP view, with physical millimeter coordinates
+and a shared conventional OPW reference dB scale. Switch to 2-D in napari to
+inspect slices; adjust the contrast floor below -40 dB to examine sidelobes.
+Use `--headless` to reconstruct without a window. The separate
+`_support.two_stage_visualization` research module retains the 8/16/32 density
+comparison and its `--density` option; interpolation experiments remain in
+`_support.interpolation`. One frame suffices for this common-phase synthetic
+scene; the everyday benchmark still times 200 frames.
 
 GPU callers can import `TwoStageOpwWorkspace` from `rcabeam.two_stage` and call
 `reconstruct(rc_gpu, cr_gpu)` with contiguous raw complex64 ensembles. Geometry
