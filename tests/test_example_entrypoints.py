@@ -2,6 +2,7 @@
 
 import importlib
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,23 +15,18 @@ def examples(monkeypatch):
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "examples"))
 
 
-@pytest.mark.parametrize("suite", ["rca", "two-stage", "matrix-backends", "ffdas-paper", "matrix-chunks"])
-def test_benchmark_dispatch(examples, monkeypatch, suite):
+def test_benchmark_runs_all_methods_without_arguments(examples, monkeypatch):
     entry = importlib.import_module("benchmark")
     calls = []
-    names = []
+    monkeypatch.setitem(sys.modules, "_support.rca_benchmark", SimpleNamespace(main=lambda: calls.append(1)))
+    entry.main([])
+    assert calls == [1]
 
-    def load(name):
-        names.append(name)
-        return SimpleNamespace(main=lambda argv: calls.append(argv))
 
-    monkeypatch.setattr(entry.importlib, "import_module", load)
-    entry.main([suite, "--help"])
-    assert names == [f"_support.{entry.SUITES[suite]}"]
-    assert calls == [["--help"]]
-    if suite == "rca":
-        entry.main(["--no-matrix", "--method", "opw"])
-        assert calls[-1] == ["--no-matrix", "--method", "opw"]
+@pytest.mark.parametrize("args", [["two-stage"], ["--method", "opw"], ["--no-matrix"]])
+def test_benchmark_rejects_selection_arguments(examples, args):
+    with pytest.raises(SystemExit, match="2"):
+        importlib.import_module("benchmark").main(args)
 
 
 @pytest.mark.parametrize("comparison", ["rca", "two-stage", "interpolation"])
@@ -60,8 +56,15 @@ def test_entrypoint_help_and_invalid_selection(examples, monkeypatch, capsys, na
     def reject_import(name):
         raise AssertionError(f"Top-level help must not import optional suite {name}")
 
-    monkeypatch.setattr(entry.importlib, "import_module", reject_import)
-    entry.main(["--help"])
+    if name == "visualize":
+        monkeypatch.setattr(entry.importlib, "import_module", reject_import)
+    else:
+        monkeypatch.setitem(sys.modules, "_support.rca_benchmark", SimpleNamespace(main=reject_import))
+    if name == "benchmark":
+        with pytest.raises(SystemExit, match="0"):
+            entry.main(["--help"])
+    else:
+        entry.main(["--help"])
     assert "two-stage" in capsys.readouterr().out
     with pytest.raises(SystemExit, match="2"):
         entry.main(["missing"])

@@ -17,44 +17,38 @@ uv sync --group dev
 uv run pytest -q
 ```
 
-Optional fully populated matrix (FPM) comparisons use `mach-beamform` and CuPy
-(CUDA 13): `uv sync --extra matrix --group dev`.
+The all-method benchmark needs CuPy (CUDA 13): `uv sync --extra gpu --group dev`.
+Install the `matrix` extra instead to also include the fully populated matrix
+(FPM) reference: `uv sync --extra matrix --group dev`.
 For cross-compilation or GPU-less builds, explicitly select the target architecture
 with `cmake.define.CMAKE_CUDA_ARCHITECTURES` when installing through `uv pip`.
 
 ## Benchmark and visualize
 
 ```bash
-# RCA only; add --iq to export the complex ensemble instead of reducing it.
-uv run python examples/benchmark.py --no-matrix --method opw
-
-# Opt-in FP16 packed sample storage; reconstruction arithmetic stays FP32.
-uv run python examples/benchmark.py --no-matrix --method opw --iq-storage float16
-
-# All methods plus the FPM comparison.
-uv run --extra matrix python examples/benchmark.py
+# Every RCA method, including two-stage OPW, in one Rich results table.
+uv run examples/benchmark.py
 
 # One napari entry point: RCA methods, two-stage OPW, or interpolation.
 uv run python examples/visualize.py rca --fast
-uv run --extra gpu python examples/visualize.py two-stage
+uv run python examples/visualize.py two-stage
 uv run python examples/visualize.py interpolation
 
 # Acquisition storage and throughput estimates.
 uv run python examples/storage_estimate.py
-
-# S4 multiplexed FPM: four 8x32 strips, five x-steered waves.
-uv run --extra matrix python examples/benchmark.py --matrix-sequence s4 --method opw
-
-# Tune FPM chunks on this GPU; add --iq to tune IQ export separately.
-uv run --extra matrix python examples/benchmark.py matrix-chunks
-uv run --extra matrix python examples/benchmark.py matrix-chunks --sequence s4
 ```
 
-Only `benchmark.py`, `visualize.py`, and `storage_estimate.py` are entry points;
-`examples/_support/` contains shared implementation, not standalone scripts.
-Benchmark suites are `rca` (default), `two-stage`, `matrix-backends`, `ffdas-paper`,
-and `matrix-chunks`. Existing `benchmark.py --no-matrix ...` commands still work.
-Use `benchmark.py SUITE --help` or `visualize.py COMPARISON --help` for options.
+The benchmark has no suite, method-selection, or configuration arguments. It runs
+OPW, two-stage OPW, XDoppler, RC-FMAS, St-SW, and DMAS-CCF-ACF on the same inputs.
+The mach FPM reference is included automatically when installed, otherwise shown
+as skipped. Results report the best of three warmed trials, paired raw-upload
+time, and RCA speed relative to OPW. Two-stage uses 8 samples/wavelength and
+32-frame chunks; its approximation and synthetic power RMS error are visible
+in the table. Density/PSF sweeps and verbose JSON are not part of this command.
+
+Only `benchmark.py`, `visualize.py`, and `storage_estimate.py` are top-level
+scripts. Shared implementation and specialized research harnesses live under
+`examples/_support/`. Use `visualize.py COMPARISON --help` for viewer options.
 Visualization opens napari immediately after reconstruction—no timing trials or
 PSF sweeps. Add `--headless` for a compute-only check. Comparable OPW/interpolation
 layers share a reference scale; nonlinear RCA methods retain per-method
@@ -67,20 +61,39 @@ FPM retains **32×32 receivers, 96 µm lateral spacing, and five waves
 (0°, ±3° along x/y)**; this adapts the paper's lateral grid/sequence, not its
 probe physics or acquired dataset. IQ uses **20 MS/s, 15 MHz full −6 dB
 bandwidth, and at least 368 samples**, extending the receive window when needed.
-Override depth with `--min-depth`, `--max-depth`, `--depth-step`; FPM lateral
-geometry uses `--matrix-grid X Y` and `--matrix-spacing`. The volume viewer uses
-matched RCA/FPM axes for visual comparison. Storage defaults use the benchmark
-grids and float32 PD.
+The everyday benchmark fixes this workload; custom geometry belongs in the
+research harnesses below. The volume viewer uses matched RCA/FPM axes for visual
+comparison. Storage defaults use the benchmark grids and float32 PD.
 
-RCA-suite timings exclude simulation but include allocations, transfers, packing, and
-reconstruction/reduction. These are different acquisitions, not a controlled
-image-quality comparison. Each full result also reports measured
+Timings exclude simulation, first-use compilation and validation, but include
+allocations, transfers, packing where needed, and reconstruction/reduction.
+Two-stage retains IQ on GPU before reducing it; only the final volume is downloaded.
+RCA methods share one acquisition; FPM uses a different acquisition/grid, so its
+row is a reference, not a controlled speedup or image-quality comparison. Each full result also reports measured
 raw H2D wall time from that same run; this is not a Verasonics GPU-DMA
 measurement. Actual GPUDirect capability and RF-to-IQ ingress
 processing still need hardware validation. FPM power-only output reduces each
 coherently compounded chunk, saving the default **2.22 GB** full-IQ buffer.
 
-The chunk tuner uses interleaved full-pipeline medians and checks output parity;
+### Specialized research harnesses
+
+These are separate from the no-argument benchmark; their timing boundaries,
+numerical checks, and precision guards are retained:
+
+```bash
+# Detailed single-frame/staged diagnostics or opt-in FP16 storage experiments.
+PYTHONPATH=examples uv run python -m _support.rca_diagnostics --help
+
+# S4 multiplexed FPM: four 8×32 strips, five x-steered waves.
+PYTHONPATH=examples uv run python -m _support.rca_diagnostics --matrix-sequence s4 --method opw
+
+# Tune FPM chunks; add --iq to tune IQ export separately.
+PYTHONPATH=examples uv run python -m _support.matrix_chunks
+PYTHONPATH=examples uv run python -m _support.matrix_chunks --sequence s4
+```
+
+The everyday benchmark also rejects overlapping compute workers. The chunk
+tuner uses interleaved full-pipeline medians and checks output parity;
 it discards detected overlaps with other compute workers. It prints an explicit
 `--matrix-frame-chunk` recommendation without changing defaults. Match its
 `--grid`, `--side`, `--frames`, and `--iq` settings to your workload; close results
@@ -90,7 +103,7 @@ Agent experiment results and rejected approaches: [ROADMAP.md](ROADMAP.md).
 
 ### Matched mach/ffdas comparison
 
-`examples/benchmark.py matrix-backends` uses identical five-target complex64
+The `_support.matrix_backends` research module uses identical five-target complex64
 channels, F-number 1 rectangular aperture, five coherently compounded waves,
 and canonical GPU IQ for both libraries. It validates every trial against an
 independent float64 NumPy reference before reporting randomized/interleaved
@@ -106,9 +119,9 @@ without modifying that checkout, and set `FFDAS_LIB_DIR` to its library director
 For example, after installation into `/tmp/rcabeam-fpm-env`:
 
 ```bash
-FFDAS_LIB_DIR=/path/to/ffdas/lib LD_LIBRARY_PATH=/path/to/ffdas/lib \
+PYTHONPATH=examples FFDAS_LIB_DIR=/path/to/ffdas/lib LD_LIBRARY_PATH=/path/to/ffdas/lib \
   uv run --no-project --python /tmp/rcabeam-fpm-env/bin/python \
-  python examples/benchmark.py matrix-backends --repeat 3
+  python -m _support.matrix_backends --repeat 3
 ```
 
 This ffdas revision has ALG2 local-accumulator overruns for small calls and
@@ -122,7 +135,7 @@ The independent process monitor rejects overlapping compute workers without
 stopping them. Desktop activity and host memory/I/O pressure remain limitations.
 See [ROADMAP.md](ROADMAP.md) for validated measurements and discarded unsafe runs.
 
-`examples/benchmark.py ffdas-paper` isolates the paper-like single-wave TC
+The `_support.ffdas_paper` research module isolates the paper-like single-wave TC
 benchmark: 1024 receivers, 128 frames, 256 IQ samples, native GPU output and
 ffdas CUDA-event timing, including internal permutation/conversion but no host
 transfers or canonical output restoration. Run it in the same isolated
@@ -135,7 +148,7 @@ exact reproduction. Inputs are deterministic random IQ: the paper states
 geometry, not simulation fidelity, determines the DAS access pattern.
 Unsafe 128-frame ALG2 calls are not benchmarked here.
 
-S4 uses 300 µm FPM pitch by default (`--matrix-pitch` overrides it), retains
+The research S4 harness uses 300 µm FPM pitch by default (`--matrix-pitch` overrides it), retains
 physical strip coordinates, and combines all sector/angle IQ before power.
 Two-repeat averaging is assumed upstream: 40 physical firings become 20
 256-channel datasets per frame. No duplicate reconstruction for averaging.
@@ -228,16 +241,20 @@ Frame chunks bound plane/spline scratch; final canonical IQ is retained.
 The conventional OPW APIs and defaults are unchanged.
 
 ```bash
-uv run --extra gpu python examples/benchmark.py two-stage
+# Two-stage is included alongside every other RCA method by default.
+uv run examples/benchmark.py
 # Napari reconstructs one frame; no benchmark trials or PSF sweeps.
-uv run --extra gpu python examples/visualize.py two-stage
-# Smaller benchmark smoke run; default axial grid/depth/frequency are retained.
-uv run --extra gpu python examples/benchmark.py two-stage --grid 12 --elements 12 --angles 3 --frames 7 --repeat 1 --density 8
+uv run python examples/visualize.py two-stage
+# Optional research sweep, separate from the readable all-method table.
+PYTHONPATH=examples uv run python -m _support.two_stage_benchmark
+# Small research smoke run; default axial grid/depth/frequency are retained.
+PYTHONPATH=examples uv run python -m _support.two_stage_benchmark --grid 12 --elements 12 --angles 3 --frames 7 --repeat 1 --density 8
 ```
 
-The benchmark prints randomized/interleaved resident and preallocated host-IQ
+The research sweep retains randomized/interleaved resident and preallocated host-IQ
 round-trip timings against the existing spatial FP32 workspace, a sampling-density
-sweep, complex/amplitude/power/phase errors, and fine single-target PSF axis traces.
+sweep, complex/amplitude/power/phase errors, and fine single-target PSF axis traces
+as machine-readable JSON. It is not run by the everyday benchmark.
 Resident includes both stages and spline solves; round-trip adds raw H2D,
 conventional packing, and full IQ D2H. Setup, JIT, simulation, and validation
 are excluded; GPU worker monitoring rejects overlapping compute jobs.

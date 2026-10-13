@@ -355,3 +355,7 @@ def main(argv=None) -> None:
         cp.get_default_memory_pool().free_all_blocks()
         if not backends:
             raise RuntimeError("No backend passed numerical validation")
+
+
+if __name__ == "__main__":
+    main()

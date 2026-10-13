@@ -1,6 +1,6 @@
 """Tune FPM chunks without changing saved defaults.
 
-Use benchmark.py matrix-chunks --iq to tune IQ export separately from power.
+Run as _support.matrix_chunks with PYTHONPATH=examples; --iq tunes IQ export separately from power.
 """
 
 from __future__ import annotations
@@ -118,3 +118,7 @@ def main(argv=None) -> None:
     best = min(complete, key=lambda chunk: median(complete[chunk]))
     print(f"\nRecommended for this GPU/workload/mode: --matrix-frame-chunk {best}")
     print("Close medians are inconclusive; rerun with --repeat 5. No defaults were modified.")
+
+
+if __name__ == "__main__":
+    main()

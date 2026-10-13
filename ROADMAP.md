@@ -201,7 +201,7 @@ prevent a Python monitor thread from observing overlaps. Nsight Systems is
 available; Nsight Compute counters remain permission-blocked. Earlier unsafe
 ALG2 profiling timings are not retained as performance evidence.
 
-Reproduce with `examples/benchmark.py matrix-backends`. Local accepted log:
+Reproduce with `PYTHONPATH=examples uv run python -m _support.matrix_backends`. Local accepted log:
 `/tmp/rcabeam-fpm-safe-three-trials.log`; sanitizer:
 `/tmp/rcabeam-fpm-safe-memcheck.log`. Earlier unsafe/overlapped logs are retained
 locally only to diagnose the rejection, not to support throughput claims.
@@ -210,7 +210,7 @@ tests, generated images, PDF, external source edits or commits were added.
 
 ## Paper-like single-observation TC checkpoint
 
-A closer comparison uses `examples/benchmark.py ffdas-paper`: 1024 receivers,
+A closer comparison uses `PYTHONPATH=examples uv run python -m _support.ffdas_paper`: 1024 receivers,
 128-frame batch, Q=1, K=256 complex64 IQ samples, λ receiver pitch, native
 batch-first GPU output and ffdas's CUDA-event timer. Internal permutation,
 FP16 conversion and warmed output allocation requests are included; H2D,
@@ -432,8 +432,8 @@ resident target remains unmet, even before considering quality/clutter filtering
   still encounters existing native-extension resolution/test typing issues, and
   whole-tree formatting flags the pre-existing README workspace snippet.
 
-Reproduce with `uv run --extra gpu python examples/benchmark.py two-stage`.
-Default output includes the 8/16/32 density sweep, all individual timings, quality
+Reproduce with `PYTHONPATH=examples uv run python -m _support.two_stage_benchmark`.
+Research output includes the 8/16/32 density sweep, all individual timings, quality
 metrics, telemetry and single-target axis diagnostics. Local initial logs:
 `/tmp/rcabeam-two-stage-default.log`, `/tmp/rcabeam-two-stage-psf.log`,
 `/tmp/rcabeam-two-stage-{memcheck,synccheck,racecheck}.log`, and
@@ -453,9 +453,9 @@ Internal modules under `_support/` retain the scientific implementations rather
 than adding standalone scripts or moving example orchestration into the library.
 The unused point-target demo and duplicated monolithic RCA reference were removed.
 
-Benchmark suites: `rca` (also accepts the original no-subcommand flags),
-`two-stage`, `matrix-backends`, `ffdas-paper`, and `matrix-chunks`.
-Each retains its existing timing boundary and best/median reporting convention;
+At this checkpoint the benchmark dispatched `rca`, `two-stage`, `matrix-backends`,
+`ffdas-paper`, and `matrix-chunks`; the no-argument update below supersedes that CLI.
+Each research harness retains its existing timing boundary and best/median reporting convention;
 this consolidation does not make unlike timings directly comparable. ALG2 batch
 padding/guards, independent references, precision checks, and discarded-trial
 rules remain. The chunk tuner now uses the same independent process-based GPU
@@ -486,3 +486,45 @@ rerun: its separate Python 3.12+ source-built environment is still required;
 its suite help and preserved source checks remain available. Targeted lint,
 format and type checks pass (type checking excludes unavailable native imports).
 README and historical reproduction commands now use the consolidated entry points.
+
+## No-argument benchmark
+
+`uv run examples/benchmark.py` now runs every RCA method in one Rich table:
+OPW, two-stage OPW, XDoppler, RC-FMAS, St-SW, and DMAS-CCF-ACF. The mach FPM
+reference runs automatically when installed; otherwise its row is explicitly
+skipped. No suite or configuration arguments are accepted. The fixed acquisition
+matches the shared five-target scene: 80+80 elements, 16+16 angles, 200 frames,
+80×80×157 voxels (x/y/z), 15 MHz carrier/full bandwidth, and 20 MS/s IQ.
+
+RCA rows use the same host-channel-to-host-volume boundary, including allocations,
+raw H2D, reconstruction/reduction and final volume D2H. The two-stage row uses
+8 samples/wavelength and 32-frame chunks, retains its full GPU IQ and then reduces
+power on GPU; it does not download full IQ. The table explicitly marks it as an
+approximation and reports power RMS error against OPW. No clutter filtering is
+included. RCA trials are warmed, interleaved in deterministic shuffled order,
+validated, and reported as best of three with raw H2D paired to that same trial.
+Independent NumPy channel DAS checks OPW power at targets and boundary voxels.
+Overlapping compute workers and monitor failures abort rather than report a
+contaminated result. FPM retains its existing streaming best-of-three boundary;
+its different acquisition/grid is marked and receives no RCA speedup ratio.
+
+Research density/PSF sweeps, native ffdas comparisons, S4/chunk tuning, FP16 and
+single-frame/staged diagnostics remain available as `_support` modules, invoked
+with `PYTHONPATH=examples uv run python -m _support.MODULE`. The old configurable
+RCA driver is now `_support.rca_diagnostics`; none of these research sweeps run
+in the everyday benchmark. Their numerical checks, timing boundaries and ALG2
+safety guards are unchanged.
+
+A complete default all-method run, including mach FPM, is recorded locally in
+`/tmp/rcabeam-all-methods-benchmark.log`. The synthetic power error is 8.2%,
+consistent with the earlier two-stage experiment. These timing samples remain
+qualified by desktop activity, clocks and thermal state; they are not a new
+controlled performance claim. Acquired-data/clutter-filtered quality remains
+unvalidated.
+
+Validation: 114 tests pass, including all-method execution, paired best-trial
+upload timing, missing/installed FPM handling, invalid-volume rejection, GPU
+complex-IQ power reduction and a small real-GPU all-method smoke. The complete
+default workload ran with mach FPM. Lint, changed-Python formatting, targeted
+typing and `git diff --check` pass. All five research-module help paths work;
+native ffdas execution and interactive napari rendering were not rerun.

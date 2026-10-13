@@ -1,5 +1,6 @@
 """Compare experimental dual-stage OPW against the retained spatial FP32 path.
 
+Research density/PSF sweep, separate from the everyday all-method Rich table.
 Same five-target acquisition as benchmark.py. Timings exclude simulation, JIT,
 setup and quality checks. Resident includes dense planes, spline solves and
 canonical IQ expansion. Roundtrip adds raw H2D, conventional packing and full
@@ -270,3 +271,7 @@ def main(argv=None):
         gc.collect()
         cp.get_default_memory_pool().free_all_blocks()
     print(json.dumps({"single_target_axis_diagnostics": psf_diagnostics(angles, geom, args.density)}), flush=True)
+
+
+if __name__ == "__main__":
+    main()
