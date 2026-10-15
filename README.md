@@ -96,10 +96,69 @@ PYTHONPATH=examples uv run python -m _support.rca_diagnostics --matrix-sequence 
 PYTHONPATH=examples uv run python -m _support.matrix_chunks
 PYTHONPATH=examples uv run python -m _support.matrix_chunks --sequence s4
 
+# Tissue/blood/noise scene checkpoint: unfiltered OPW plus component spectra.
+PYTHONPATH=examples uv run python -m _support.clutter_benchmark
+# SVD128 reference vs SVD64 and optimized EVD128/EVD64 in both domains.
+# Rank 2 is an illustrative synthetic cutoff, not a clinical default.
+PYTHONPATH=examples uv run python -m _support.clutter_benchmark --rank-start 2 --output /tmp/clutter-filtered.json
+# Optional scene-only detailed report (kept out of terminal output).
+PYTHONPATH=examples uv run python -m _support.clutter_benchmark --output /tmp/clutter-details.json
+# Quick scene smoke before running the full default acquisition.
+PYTHONPATH=examples uv run python -m _support.clutter_benchmark --grid 12 --elements 12 --angles 3 --frames 32 --repeat 1
+
 # Separate interpolation and two-stage density visualization experiments.
 PYTHONPATH=examples uv run python -m _support.interpolation
 PYTHONPATH=examples uv run python -m _support.two_stage_visualization
 ```
+
+The clutter checkpoint preserves the old common-phase scene and all-method
+benchmark. Its new scene has 16 strong tissue and five weaker blood point
+scatterers, heterogeneous slow-time modulation, and reproducible channel noise.
+Ground-truth components are materialized one at a time from compact factors.
+It prints a compact component table and median unfiltered mixture OPW time.
+Use `--output PATH` to save detailed spectra, timings and telemetry as JSON;
+raw arrays are not dumped to the terminal. Simulation, spectral analysis
+and independent numerical checks are outside timing. Without `--rank-start` it
+remains scene-only. With an explicit cutoff it compares a full complex128 GPU
+SVD reference against direct SVD64 and optimized complex128/complex64 Gram-EVD
+filtering in the beamformed and shared-RC/CR channel domains (eight rows).
+Both direct SVD precisions reconstruct `U Sigma V^H` after zeroing discarded
+singular values; SVD64 distinguishes precision loss from Gram conditioning.
+Old intermediate benchmark variants are not retained.
+`--rank-stop` optionally excludes high ranks; otherwise the retained interval ends
+at the original frame count. No automatic cutoff is selected.
+
+Filtered rows use warmed randomized/interleaved trials. SVD128/EVD128 are checked
+against sampled CPU projection; EVD128 must also agree with SVD128. All candidates
+report PD relative-L2 error against the same-domain SVD128 reference.
+Complex64 loss is reported, not silently accepted or replaced by complex128;
+relative-L2 or peak-normalized maximum PD error above 0.5% triggers an engineering
+warning, not a clinical acceptance criterion. Memory-limited cases are explicitly
+skipped; numerical SVD64/EVD64 failures are labeled failed.
+
+The compact table also reports total/filter time, sampled noiseless tissue power
+left and blood power retained. Component fractions use the estimated projector
+in CPU complex128: they describe component transfer, not complex64 arithmetic
+accuracy, image purity or acquired-flow sensitivity. JSON adds both PD error
+metrics, stage times, telemetry, bases/spectra, normalized-Gram eigenvalue/clipping
+diagnostics, projector size and peak active CuPy-pool bytes (not driver/cuBLAS
+memory). Allocation and cleanup are included; diagnostic transfers are not.
+
+The optimized Gram projector uses whichever is smaller: retained components or the
+complement. Keeping `[2, 200)` therefore subtracts two discarded modes instead of
+reconstructing 198 retained modes. Gram image-domain PD computes chunked residual IQ
+and double-precision power sums without allocating the full filtered ensemble or
+subtracting nearly equal total/projected energies; its filter time includes PD.
+Channel-domain filtering still reconstructs all T frames before OPW. All paths
+normalize power by original T. The unfiltered comparator uses fused power-only
+OPW; filtered pipelines materialize unfiltered image IQ, so subtracting total times
+does not isolate filtering cost. Temporal-component beamforming is not implemented.
+
+Fixed scatterer positions with complex-amplitude modulation are not physical
+flow/motion simulation or acquired-data validation; source amplitude ratios are
+not prescribed beamformed SNR. The spectrum's 0.1% reporting threshold is only a
+diagnostic, not a filtering cutoff. Full-size filtered timings are left to the
+operator; the small smoke can also use `--rank-start 2`.
 
 The everyday benchmark also rejects overlapping compute workers. The chunk
 tuner uses interleaved full-pipeline medians and checks output parity;
@@ -199,6 +258,86 @@ The default remains `float32`. Nonlinear methods do not accept FP16 storage.
 
 The direct reductions are **unfiltered**. Clutter filtering and subsequent power
 estimation are separate steps; these benchmarks are not a complete fUSI pipeline.
+
+## CPU reference clutter filters
+
+`svd_clutter_filter` accepts complex64/complex128 NumPy IQ with frames on the last
+axis. It retains an explicit zero-based interval `[rank_start, rank_stop)` from
+the global temporal SVD, without implicit centering or windowing. There is no
+universal tissue cutoff; supply one appropriate to the experiment. `rank_stop=None`
+keeps through the final component; an empty interval returns zero IQ.
+
+For a **small reference ensemble** `iq` and a chosen rank interval:
+
+```python
+from rcabeam import power_doppler, svd_clutter_filter, temporal_basis
+
+filtered = svd_clutter_filter(
+    iq, rank_start=rank_start, rank_stop=rank_stop, method="gram"
+)
+pd = power_doppler(filtered)  # Mean over the original frame count.
+singular_values, V = temporal_basis(iq, method="svd")  # Temporal vectors are columns.
+```
+
+`method="svd"` (the default) uses full direct SVD reconstruction after zeroing
+unwanted singular values; `method="gram"` accumulates the
+T-by-T temporal Gram matrix in row chunks and uses Hermitian EVD. Both use
+complex128 working precision; filtered IQ preserves input shape/dtype and does
+not modify the input. The Gram method avoids spatial singular vectors, but
+squares the condition number and can lose weak modes even with complex128
+accumulation. Tiny negative eigenvalues are clipped; substantial negatives or
+nonfinite results raise errors. Eigenvector phases and bases within degenerate
+clusters are not uniquely defined—compare projectors or filtered signals.
+
+These are CPU references, **not the full-volume GPU filtering benchmark**.
+For a shared RC/CR reference basis, stack both arrays on a non-temporal axis
+before filtering (this allocates additional memory). Independent RC/CR calls
+estimate different bases, as do channel-domain and beamformed-domain filters.
+The existing ensemble APIs remain unfiltered; the clutter benchmark enables GPU
+filtering only with an explicit rank cutoff. Preconditioned EVD is not implemented.
+
+### GPU clutter filters
+
+The optional `rcabeam.gpu_clutter` module accepts resident complex64/complex128
+CuPy arrays. It provides `temporal_basis`, `apply_temporal_filter`, `filtered_power`,
+`svd_reference` and `svd_clutter_filter`; the GPU default backend is `method="gram"`
+with explicit `precision="complex128"` by default. For example,
+with an explicitly chosen `rank_start`:
+
+```python
+from rcabeam.gpu_clutter import apply_temporal_filter, temporal_basis
+
+s, V = temporal_basis((rc_gpu, cr_gpu), method="gram")
+rc_filtered, cr_filtered = apply_temporal_filter(
+    (rc_gpu, cr_gpu), V, rank_start=rank_start
+)
+```
+
+Tuple inputs estimate/use one shared basis without concatenation in the Gram
+path. `temporal_basis(..., precision="complex64")` explicitly selects lower-precision
+SVD or covariance/EVD; application arithmetic follows the supplied basis dtype.
+`svd_clutter_filter` accepts the same precision selector for both backends.
+Global amplitude scaling and row normalization prevent covariance overflow;
+componentwise real division avoids overflow inside complex division itself.
+Diagnostics expose the scaled Gram's minimum eigenvalue, negative count and
+roundoff tolerance. Small negative **eigenvalues** are clipped before square root;
+large negatives raise. Hermitian symmetry alone does not guarantee PSD, and
+finite-precision `X^H X` can lose PSD numerically. Scaling does not recover weak
+modes lost by squared conditioning; even complex128 Gram can lose sufficiently
+weak modes. Complex64 is an experiment, not a new default.
+
+SVD128 remains the reference. `svd_reference(..., precision="complex64")` runs the
+same full reconstruction through cuSOLVER `cgesvd` rather than `zgesvd`; its
+singular values are float32 and its basis complex64. Inputs must remain finite
+after conversion to complex64; otherwise it fails rather than falling back.
+For tall matrices, spatial vectors overwrite the solver's input buffer.
+Basis-only tall-matrix SVD does not request spatial vectors. Destructive input
+copies/workspaces can still be large. Gram projections are
+chunked and use the smaller subspace; `filtered_power(iq_gpu, V, rank_start=...)`
+returns float64 image PD without full filtered-IQ allocation. Filtered IQ preserves
+input dtype/shape; inputs are never modified. Results use the current CUDA device
+and stream. There is no silent precision fallback, sampled basis, temporal
+compression or eigensolver preconditioning.
 
 ## GPU-resident OPW
 

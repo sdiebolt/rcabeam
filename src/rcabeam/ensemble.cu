@@ -700,10 +700,13 @@ static rcabeam_status ensemble_impl(
 #undef TILED
   if (cudaGetLastError() != cudaSuccess)
     return RCABEAM_ERROR_CUDA;
-  finish<<<(nv + 127) / 128, 128>>>(
-      pd, weights, static_cast<const float2 *>(workspace), nv, nt, method, k);
-  return cudaGetLastError() == cudaSuccess ? RCABEAM_SUCCESS
-                                           : RCABEAM_ERROR_CUDA;
+  if (method == 1 || method == 4) {
+    finish<<<(nv + 127) / 128, 128>>>(
+        pd, weights, static_cast<const float2 *>(workspace), nv, nt, method, k);
+    if (cudaGetLastError() != cudaSuccess)
+      return RCABEAM_ERROR_CUDA;
+  }
+  return RCABEAM_SUCCESS;
 }
 
 rcabeam_status rcabeam_ensemble_device(

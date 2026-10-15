@@ -40,12 +40,18 @@ def simulate_channels(geom, angles, nsamp, t_start, bandwidth_hz):
     )
 
 
-def ensemble_scene(grid_size, elements, angle_count, frames):
-    """The fixed default acquisition for the dual-stage comparison."""
+def acquisition_geometry(grid_size, elements, angle_count):
+    """Shared RCA geometry for reconstruction and clutter-filtering scenes."""
     el = (np.arange(elements) - (elements - 1) / 2) * 0.1e-3
     geom = RCAGeometry(el, el, fs=20e6, f_demod=15e6, fnumber=1)
     angles = np.deg2rad(np.linspace(-8, 8, angle_count))
     grid = (np.linspace(-4e-3, 4e-3, grid_size), depth_axis(4e-3, 12e-3, 15e6), np.linspace(-4e-3, 4e-3, grid_size))
+    return angles, grid, geom
+
+
+def ensemble_scene(grid_size, elements, angle_count, frames):
+    """The fixed common-phase acquisition for reconstruction comparisons."""
+    angles, grid, geom = acquisition_geometry(grid_size, elements, angle_count)
     phase = np.exp(2j * np.pi * np.arange(frames) / frames).astype(np.complex64)
     raw = [np.ascontiguousarray(v[..., None] * phase) for v in simulate_channels(geom, angles, 368, 2e-6, 15e6)]
     return raw, angles, grid, geom

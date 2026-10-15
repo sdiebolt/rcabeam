@@ -1,5 +1,6 @@
 """Experimental RCA beamforming package."""
 
+from rcabeam.clutter import svd_clutter_filter, temporal_basis
 from rcabeam.dmas import dmas_bruteforce, dmas_ccf_acf_core, dmas_ccf_acf_frame
 from rcabeam.ensemble import beamform_ensemble, ensemble_pd_from_channels
 from rcabeam.fmas import rc_fmas, rc_fmas_pd, signed_sqrt
@@ -39,6 +40,8 @@ __all__ = [
     "simulate_point",
     "st_sw_pd",
     "st_sw_weights",
+    "svd_clutter_filter",
+    "temporal_basis",
     "xdoppler_pd",
     "xdoppler_pd_from_channels",
     "xdoppler_signal",

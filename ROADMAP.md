@@ -1,8 +1,647 @@
 # Optimization record
 
-Goal: reconstruct 200 RCA frames within 400 ms, before clutter filtering.
+Historical goal: reconstruct 200 RCA frames within 400 ms, before clutter filtering.
+Current real-time objective: process each 200-frame, 500 Hz ensemble within its
+400 ms arrival interval, including filtering and host-input-to-host-PD overhead.
+This is a throughput budget for nonoverlapping windows, not acquisition-to-output
+latency; overlapping windows require a budget based on their smaller frame step.
 Workload: 15 MHz, 80+80 receivers, 16 RC + 16 CR angles, 80×80×157 voxels,
-4–12 mm depth, lambda/2 maximum axial spacing. The goal remains unmet.
+4–12 mm depth, lambda/2 maximum axial spacing. Both targets remain unmet.
+
+## Current recommended execution plan
+
+This execution order supersedes the historical "next" recommendations below.
+Completed checkpoints below distinguish implemented filters/baselines from
+future temporal compression, preconditioning and reconstruction experiments.
+Preserve the current unfiltered reconstruction benchmark and APIs as references.
+The historical 400 ms goal is **before filtering**; keep it distinct from the
+current complete-pipeline throughput objective above.
+
+### Latest decision and immediate next steps
+
+Steps 1–4 below are implemented and have operator full-size results. The latest
+`[3,200)` run is recorded under **Operator full-size optimized filtering result**.
+EVD64 is the working candidate for this synthetic high-pass case; SVD128 remains
+the gold reference, and the library's complex128 default is unchanged.
+
+1. **Freeze the measured reference and precision/quality checks.** Preserve the
+   eight-row benchmark, explicit rank bounds, stage timings and optional JSON.
+   Add a small targeted sweep of tissue/blood dynamic range and the spectral gap
+   at the cutoff. Compare dominant-only removal separately from upper-cutoff
+   filtering; measure weak-component residual/IQ errors as well as whole-PD error.
+   Do not accept a precision for acquired-data use from this synthetic scene alone.
+2. **Make structural OPW work the main performance track (step 7).** Reconstruction
+   is ~1.32 s versus ~0.10 s EVD64 filtering. Finish fresh source-attributed main/
+   tail profiling to locate dependent gathers/interpolation stalls, then choose
+   one exact, bounded sample-sharing/data-reuse experiment with a stated mechanism.
+   Include grouping/conversion costs and independent IQ/PD parity. Earlier blind
+   accumulator, shuffle and tail changes did not win; do not repeat them unchanged.
+   Keep hardware power/security settings unchanged without explicit authorization.
+3. **HERK is a secondary bounded microbenchmark**, not a conditioning fix. Compare
+   `Cherk`/`Zherk` against GEMM with the same normalized inputs and precision,
+   correct conjugation/triangle semantics, and all layout costs. Require a repeatable
+   complete-filter win before integration. EVD64 Gram construction is only 55–64 ms;
+   even eliminating it would save about 4% of the current complete pipeline.
+4. **Make step 5 conditional on useful retained K.** The fixed-basis commutation
+   proof remains valid, but `[3,200)` retains 197 components: exact component OPW
+   reduces nominal frame work by only 1.5% before projection overhead. Three
+   discarded tissue modes do not mean three reconstructed blood components.
+   Do not build/promote a large compressed pipeline for this cutoff. Selecting a
+   much smaller K changes the filter and needs an explicit quality/error budget;
+   five synthetic blood scatterers are not evidence of acquired blood rank five.
+5. **Defer eigensolver preconditioning and broader numerical alternatives.** The
+   eigensolve is ~2.3 ms, not the bottleneck. Revisit TSQR/small SVD if EVD64 fails
+   required accuracy and direct SVD64 is too costly; residual deflation only when
+   weak-mode/upper-cutoff resolution is actually needed. Randomized/sampled methods
+   remain separate approximations, not silent replacements.
+
+The numbered sections below retain the detailed gates and historical implementation
+order; this immediate queue supersedes their earlier implied next-step ordering.
+
+### 1. Build a meaningful clutter-filtering scene
+
+The current five-target ensemble uses a single common slow-time phase for every
+scatterer: each configuration is a fixed channel image times one temporal vector.
+It is ideally rank one, so removing its first singular component removes the
+simulated targets, not just tissue. Keep it for reconstruction/PSF parity; do not
+use it as evidence of blood/tissue separation.
+
+Add a deterministic tissue + blood + noise ensemble, retaining separate noiseless
+tissue and blood components as ground truth. Include strong, slowly varying
+spatially distributed tissue, weaker blood with distinct/decorrelating temporal
+behavior, and reproducible complex noise. Declare motion/PRF, amplitude ratios,
+noise level and temporal models; avoid making tissue and blood perfectly
+orthogonal by construction. Include multiple regions and rank/dynamic-range
+cases, rather than just a perfectly separable low-rank example. Reuse the current
+geometry/pulse simulation. Do not change the existing viewer/reference fixture
+silently or claim this synthetic scene validates acquired weak-flow sensitivity.
+
+**Gate:** reproducible components and their sum; independently checked channel
+simulation/OPW; nontrivial temporal spectrum; known blood-only/tissue-only
+reconstructions and a small inexpensive test fixture.
+
+### 2. Implement direct-SVD and temporal-Gram EVD reference filters
+
+For IQ reshaped as `X = (all non-temporal dimensions, T)`, support two explicit
+backends for the same global temporal filter:
+
+- Direct thin SVD, `X = U Sigma V^H`: independent numerical reference.
+- Hermitian EVD of the temporal Gram matrix, `C = X^H X = V Lambda V^H`:
+  reconstruct singular values as `sqrt(Lambda)` and order components descending.
+  Accumulate Gram products in bounded row chunks when needed; do not construct
+  the enormous spatial `U` matrix or full spatial covariance on this path.
+
+Use an explicit zero-based retained interval `[rank_start, rank_stop)`; do not
+invent a universal clinical cutoff. Initially use global filtering, no implicit
+centering/windowing, and retain all components above the tissue cutoff unless an
+upper noise cutoff is explicitly selected. Choose and label synthetic benchmark
+cutoffs from the declared scene, not by tuning for a favorable speed/quality result.
+Filtering is `X_f = (X V_keep) V_keep^H`; ordinary PD divides energy by original T.
+Keep acquisition-frame outputs distinct from reduced temporal-component outputs.
+
+**Gate:** complex inputs, conjugation/order, rectangular/rank-deficient/zero data,
+invalid/nonfinite inputs and rank bounds, retain-all identity, explicit empty-band
+behavior, and direct-SVD/EVD projector and filtered-power agreement. Compare
+projectors/results rather than individual vectors with arbitrary phases or
+rotations inside degenerate eigenspaces. Do not split a degenerate cluster in
+an equivalence test. Gram construction squares the condition number: test strong
+tissue/weak blood cases and accumulation precision against higher-precision
+reference; only clip roundoff-scale negative eigenvalues, not genuine failures.
+
+### 3. Add GPU filtering in both domains
+
+Reuse NumPy for the small reference and the existing optional CuPy dependency
+for resident GPU operations; no custom CUDA eigensolver initially. Benchmark
+both direct SVD and Gram EVD rather than assume the latter wins end to end.
+The small T-by-T eigensolve does not eliminate the cost of forming `X^H X`.
+
+- **Beamformed domain:** OPW IQ -> estimate temporal basis -> filter -> PD.
+- **Channel domain:** estimate one basis from vertically stacked raw RC/CR IQ,
+  filter each with that shared basis -> OPW -> PD. Gram products can be summed
+  across RC/CR without allocating the concatenated input.
+
+These estimate different bases and are different filtering methods; do not assert
+that their PD images must match. Keep dimensions, input ownership, working-memory
+bounds and precision explicit. Validate GPU results against the reference,
+including weak components; do not introduce FP16 projected-component storage yet.
+Automatic rank selection and spatially local/blockwise SVD are later quality work.
+Nonlinear DMAS/XDoppler/RC-FMAS/St-SW require separately specified filtering
+placement: filtering their final responses is not filtering IQ before nonlinearity.
+
+### 4. Integrate and profile the filtered benchmark
+
+Keep the unfiltered all-method table clearly labeled. Add separately named OPW
+filtered pipelines on the new scene, comparing direct SVD and Gram EVD in both
+domains with the same rank policy per domain. Record basis/Gram construction,
+decomposition, projection/filtering, packing, beamforming, reduction and transfers,
+plus complete host-input-to-host-PD time and peak working memory. Also report
+original T, retained K, spectra, tissue suppression and blood preservation versus
+known component references. Avoid CPU IQ round trips in the GPU path.
+
+Use warmed randomized/interleaved trials, identical inputs, finite/reference
+checks, independent worker rejection and clock/power/thermal logging. Separate
+kernel/resident timings from complete-pipeline cost; new optimization comparisons
+should report repeated medians and variation. Preserve the historical benchmark's
+best-of-three results as historical, not interchangeable with new medians.
+
+**Gate:** a reproducible filtered reference, explicit rank/precision/timing policy,
+and full-cost measurements. Acquire representative real data before making
+physiological sensitivity claims or accepting precision changes for production.
+
+### 5. Prove and measure exact temporal-component OPW
+
+For a fixed orthonormal temporal basis V_keep and fixed linear OPW operator B,
+`B(X V_keep) = (B X) V_keep`. Beamform K projected components instead of T frames,
+then calculate `PD(v) = sum_k |B(X V_keep)(v,k)|^2 / T`, **not divided by K**.
+Use the same basis for RC/CR before coherent combination. This is not valid for
+nonlinear DMAS or other nonlinear compounding/reductions.
+
+First prove full-unitary-basis PD invariance and retained-subspace equivalence to
+explicit filtering with the **same projector**, using random complex ensembles,
+RC/CR cancellation and frame/component tails. Then measure basis estimation,
+channel projection, packing, reconstruction and PD together. Inspect measured
+spectra/blood preservation before assuming a small useful K; discarding 20 of
+200 modes leaves 180 and may not repay the projection cost.
+
+**Gate:** independent equivalence tests plus a repeatable complete-pipeline win.
+No assumed linear runtime scaling or projected 5x headline without measurements.
+
+### 6. Evaluate sampled bases and sliding-window reuse, conditionally
+
+- Estimate temporal bases from spatially distributed beamformed voxel subsets.
+  Compare resulting filters with the full-volume basis across heterogeneous
+  motion/flow regions. Rearrangement remains exact for the chosen basis, but
+  subset estimation is approximate. Do not use spatial singular vectors U to
+  project channels. Region-specific bases may require separate projections.
+- Profile the filtered pipeline before choosing sliding-window preconditioning:
+  only prioritize it if overlapping-window eigensolves matter to total latency.
+  Establish an ordinary Gram-EVD sliding-window reference first. Compare several
+  overlaps/window steps, independent blocks, abrupt motion and degenerate spectra.
+
+#### Research candidate: previous-window EVD preconditioning
+
+Sebastian K. Praesius, Kees Joost Batenburg and Jorgen Arendt Jensen,
+*Real-Time SVD Clutter Filtering using Preconditioning*, IEEE IUS 2025,
+[DOI: 10.1109/IUS62464.2025.11201625](https://doi.org/10.1109/IUS62464.2025.11201625),
+[DTU publication/accepted-manuscript link](https://orbit.dtu.dk/en/publications/real-time-svd-clutter-filtering-using-preconditioning/).
+
+The DTU abstract reports 401-frame windows, batches of 32 frames, an RTX 4090,
+in vivo rat-kidney data, 1120 eigendecompositions/s (60% higher throughput), and
+640 images/s including RF transfer, beamforming, motion correction and filtering.
+These are the authors' workload-specific results, not rcabeam predictions; a 60%
+throughput increase is not a 60% latency reduction. The abstract was checked;
+fetching the linked full manuscript returned HTTP 403. Verify full-paper details
+before implementing the reported cyclic row-reordering variant or quoting the
+secondary 699/882/1120-per-second comparison as independently checked.
+
+Candidate transform: `C_prime = V_prev^H C V_prev`; diagonalize it as
+`W Lambda W^H`, then recover `V = V_prev W`. With a full unitary previous basis
+and a converged solve this is a change of coordinates, not an approximation.
+Investigate the correct row permutation for the sliding-window frame shift,
+including wraparound/new frames. A truncated previous basis is not an equivalent
+full-space preconditioner. Warm-start sign/phase/degeneracy issues need tests.
+
+A generic `eigh` call may not exploit near-diagonality. Check solver algorithm,
+iteration control and Jacobi availability before adding a custom/native backend.
+Count basis rotation, covariance formation, decomposition, recovery, state and
+memory costs; fallback to the ordinary solve when needed. Preconditioning does
+not remove covariance work, and has no guaranteed benefit for nonoverlapping
+200-frame blocks. Motion correction is not currently part of rcabeam; do not
+imply replication of the paper's complete pipeline.
+
+### 7. Structural reconstruction experiments after the filtered baseline
+
+Each candidate must state how it reduces dependencies, IQ gathers, arithmetic or
+intermediate size before implementation; retain the current kernel as reference.
+
+- Quantify neighboring-voxel overlap of interpolation sample pairs, then test
+  exact sharing with voxel-specific weights/phases and all grouping costs.
+- Derive exact RCA/OPW decomposition before coding. Geometric separability alone
+  does not make interpolation/sample access separable. The existing approximate
+  two-stage prototype has unresolved quality errors; keep it opt-in.
+- Investigate Fourier per-angle reconstruction and angular DMAS/coherence as
+  separate reconstruction/quality experiments. Fourier linearity does not prove
+  equivalence to the present aperture/interpolation model; coherent sums cannot
+  recover channel-resolved quantities required by current channel DMAS.
+  Apply clutter filtering before nonlinear operations where the method requires
+  it. F-DMAS terminology generally means filtered DMAS, not Fourier DMAS.
+- Explore tensor-core formulations only with explicit data grouping, operand
+  precision, conversion overhead and independent weak-signal validation.
+- Use source-level stalls to motivate genuine asynchronous loading or shorter
+  dependency chains, not another blind register/shuffle rewrite.
+
+### 8. Approximate temporal methods, only with a quality/error budget
+
+Separate randomized SVD (approximate subspace estimation) from random mixtures
+for power estimation. For independent zero-mean complex Gaussian entries of R
+with variance 1/K, `sum_k |B X R|^2 / T` is an unbiased per-voxel PD estimate with
+relative standard deviation 1/sqrt(K) for nonzero fixed signals. At K=32 that is
+about 18%, not an exact low-rank replacement. Use the same R across RC/CR.
+With fixed clutter projector P, use `X P R`; conditional unbiasedness requires
+R independent of the data/basis estimation. Orthogonal designs have different
+variance; a complete unitary basis preserves energy exactly. Measure spatially
+correlated estimation errors, not just an image-wide average or expected value.
+Do not promise time-series recovery. Count projection and basis-estimation cost.
+
+### Parked/rejected work and hardware policy
+
+- Single RC/CR accumulator, shared-to-shuffle phase changes and simple tail
+  remapping: tested, no retained win. Larger batches, one-voxel mapping,
+  cross-channel register pipelines and aperture-group skipping: slower or
+  inconclusive. Revisit only with a changed workload and a new hypothesis.
+- Geometry caching, native-output restoration removal, persistent voxel kernels
+  and atomic reduction redesign: low priority unless filtered-stage costs change.
+- Dimension specialization/autotuning: wait for actual retained-component sizes.
+  Compact geometry/texture interpolation: precision-sensitive research, not fixes.
+- Redundant finish removal is retained; sample-index reconstruction was not a
+  precision bug. Fewer registers/static instructions alone are not a success gate.
+- Compare 55 W/80 W or other GPUs only with controlled same-workload trials and
+  explicit approval before changing power settings; historical runs cannot
+  isolate the power-limit penalty. Keep acquired-data FP16 validation separate.
+
+### Latest profiling availability
+
+After the review experiments, the operator restored per-user R615 profiling
+capabilities. A fresh central-tile FP32 main-kernel capture succeeded: 64
+registers/thread, no spills, 65.23% achieved occupancy, 1.83 eligible warps per
+scheduler, no eligible warp in 30.64% of scheduler cycles, and long-scoreboard
+stalls accounting for about 44.6% of average warp cycles between instructions.
+Registers still limit theoretical occupancy to 66.7%; the 59/60-register
+experiment did not demonstrate a useful occupancy/performance gain. This is
+memory-dependency evidence, not a 44.6% speedup prediction or proof of which
+producer dominates without source attribution. Clocks/caches were uncontrolled;
+replay timings are not throughput measurements. Fresh FP16/source attribution
+remains to do. Report and details: `/tmp/rcabeam-opw-review/baseline-main.ncu-repz`
+and `baseline-main-details.txt`. Earlier permission-failure entries are historical.
+
+## Clutter scene checkpoint: ready for operator benchmark
+
+Step 1 now has a separate `_support.clutter_scene` / `_support.clutter_benchmark`
+harness; the common-phase scene, all-method benchmark and viewers are preserved.
+The standard geometry is shared rather than duplicated. Seed 42 generates 16
+fixed tissue points (source amplitude 20, heterogeneous 1-5 Hz amplitude/phase
+modulation), five blood points (source amplitudes 0.5-1, complex stationary AR(1)
+with rho=0.9 and 35-140 Hz modulation), and independent RC/CR complex noise
+(std 0.05 per quadrature). PRF is 500 Hz; RC/CR share scatterer temporal weights.
+No orthogonalization or rank truncation is used to manufacture separation.
+
+Spatial/temporal factors preserve noiseless tissue/blood ground truth without
+retaining four full channel ensembles; materialization and noise generation use
+bounded row chunks. This is a sparse, fixed-position point-scatterer phantom,
+not diffuse tissue, geometric translation or physical blood flow. Additional
+motion/dynamic-range scenarios and acquired data remain quality-validation work.
+
+The operator can run `PYTHONPATH=examples uv run python -m _support.clutter_benchmark`
+(default acquisition), or add `--grid 12 --elements 12 --angles 3 --frames 32 --repeat 1`
+for a quick checkpoint. The table reports sampled component IQ RMS, first-mode
+energy and spectral content. The 0.1%-of-largest spectral reporting threshold is
+not a clutter cutoff. Default output is a compact component table and median
+OPW time; `--output PATH` optionally saves spectra, all timings and
+clock/power/thermal/utilization telemetry as JSON without dumping it to the
+terminal. Telemetry spans component preparation,
+validation and GPU calls, not exclusively the timed reconstruction intervals.
+
+Only mixture full-grid unfiltered OPW is timed: warmed repeated host-input-to-PD
+calls, median and paired per-trial H2D. Scene creation, sampled component IQ/SVD,
+independent NumPy DAS checks, power/IQ consistency and component additivity checks
+are outside timing. No SVD/EVD clutter filter is implemented in this checkpoint.
+The initial full-size benchmark was left for the operator; their completed run
+is recorded below. Filter implementation does not change these timing boundaries.
+
+Validation: 151 tests pass, including compact-output/optional-report checks,
+the unchanged common-phase fixture and a
+small real-GPU scene benchmark. Tests check reproducibility, component sums,
+noise statistics, nonorthogonal temporal structure, AR(1) correlation, shared
+RC/CR weights, independent NumPy channel simulation/DAS and input validation.
+The initial focused 13-test CUDA memcheck reported zero errors. Full-size timings and tissue/
+blood separation claims are not inferred from these small correctness checks.
+
+## Operator scene baseline and CPU filter references
+
+The operator ran the default 200-frame scene checkpoint and reported:
+
+| Sampled component | IQ RMS | First-mode energy | Singular values >0.1% of largest |
+| --- | ---: | ---: | ---: |
+| Mixture | 323.21 | 94.27% | 13 |
+| Tissue | 319.09 | 96.70% | 8 |
+| Blood | 51.394 | 32.77% | 5 |
+| Noise | 2.5001 | 0.87% | 200 |
+
+Unfiltered mixture OPW median: **1499.01 ms**, three warmed complete
+host-channel-to-host-PD trials; validation passed. These are operator-supplied
+terminal results without the optional detailed telemetry report. Do not compare
+this changed scene/unknown clock-power state as a controlled speedup over prior
+scenes. The blood rank of five follows from five fixed scatterers; it is not
+evidence that acquired blood occupies only five useful dimensions. Tissue's
+remaining 3.30% energy after its first mode can still obscure weak signals.
+
+Step 2 now provides `rcabeam.temporal_basis` and `rcabeam.svd_clutter_filter`
+NumPy references in `src/rcabeam/clutter.py`. Direct SVD and temporal-Gram EVD
+return descending singular values and a complete temporal basis, including wide
+and rank-deficient cases. Both use complex128 working precision. The EVD path
+accumulates bounded row chunks without allocating spatial singular vectors.
+Filtering uses an explicit retained interval, preserves input shape/dtype and
+original frame count, and does not mutate the input. No automatic cutoff,
+centering, GPU filtering or eigensolver preconditioning was added.
+
+Tests compare known complex factorizations/projectors, filtered power with the
+original-T normalization, full/empty bands, rank deficiency and unsplit degenerate
+clusters, noncontiguous/chunked inputs, high-dynamic-range weak retained modes,
+shared stacked RC/CR, invalid inputs/bounds, overflow and negative-eigenvalue
+handling. All **192 tests pass**; focused lint, formatting and typing pass.
+These are correctness references, not evidence of Gram-EVD speed on the full
+scene. Next implement resident GPU backends and both domain pipelines, then
+provide the operator the next useful filtered-benchmark checkpoint.
+
+## Resident GPU filters and filtered benchmark checkpoint
+
+Historical baseline; superseded by the optimization/precision checkpoint below.
+
+Steps 3/4 now have a runnable baseline, not a temporal-compression optimization.
+`rcabeam.gpu_clutter` provides direct SVD, temporal-Gram EVD, explicit-basis
+filtering and a convenience estimate/filter call on resident CuPy IQ. Tuple
+inputs estimate/apply one shared RC/CR basis; the Gram path sums covariance
+products without concatenating. Arrays must be finite and on the current device.
+Filtering uses the current stream and preserves input ownership, shape/dtype and
+original frame count. Complex128 decomposition/projection is explicit in both
+backends; no automatic cutoff, sampling or precision fallback was added.
+
+Direct SVD uses cuSOLVER gesvd with only temporal vectors requested, rather than
+allocating unused spatial U. The destructive Fortran input copy and solver
+workspace remain large. Gram accumulation and full-time-series projection are
+row-chunked. Gram conditioning/negative-eigenvalue safeguards match the CPU
+reference. Solver status, nonfinite results and invalid/nonorthonormal supplied
+bases are checked, and failures propagate.
+
+Run `PYTHONPATH=examples uv run python -m _support.clutter_benchmark --rank-start 2`
+for the next operator checkpoint; optionally add `--output /tmp/clutter-filtered.json`.
+Rank 2 is an illustrative synthetic choice, not a clinical default or a rank
+selected for a promised speedup. Without `--rank-start`, the scene-only benchmark
+is preserved. `--rank-stop` is stop-exclusive and defaults to original T.
+The small smoke command can add `--rank-start 2` as well.
+
+The comparison adds beamformed-domain and shared-channel-domain filtering with
+both solvers. Every case still reconstructs/filters all original frames and
+normalizes power by T. New trials are warmed and randomized/interleaved; foreign
+worker rejection and per-trial clock/power/thermal telemetry remain active.
+Each pipeline includes allocation, raw H2D, packing, basis estimation, full
+filtering, OPW, PD reduction and final PD D2H. Unused raw/packed/workspace buffers
+are released before image-domain decomposition to bound working memory.
+The unfiltered comparator is fused power-only; filtered rows materialize IQ,
+so differences in total time are not solely filter cost.
+
+Compact output reports total/filter time and sampled noiseless tissue-power
+residual/blood-power retention through each pipeline's own fixed projector.
+These are not image purity or acquired-flow sensitivity metrics. Optional JSON
+retains stages (matrix construction and decomposition separately, synchronized
+wall times), spectra/bases, per-trial timings/telemetry and peak active CuPy-pool
+allocated bytes; driver/cuBLAS allocations are excluded from that memory metric.
+Small diagnostic transfers and checks are outside the timed PD path. Explicit
+GPU-memory skips do not substitute another algorithm or precision. Non-memory
+solver/validation failures abort rather than produce misleading timings.
+
+Proof: GPU direct/EVD outputs agree with independent NumPy complex128 references
+for wide/tall, zero, noncontiguous, shared RC/CR and weak-band cases. Tests cover
+input/rank/basis validation, propagated solver failure and explicit memory skips.
+Small end-to-end comparisons check direct/EVD agreement within each domain,
+full-volume repeatability, and sampled PD against CPU filtering of sampled OPW
+IQ with the same basis. Channel and image bases are intentionally not equated.
+All **229 tests pass**, focused lint/format/type checks pass, and a 51-test CUDA
+memcheck run reports zero errors. Full-size comparative timings remain for the
+operator; no SVD/EVD speedup is claimed from small correctness tests.
+
+Next gate: inspect operator stage timings and component preservation before
+choosing cutoffs or prioritizing exact component-space OPW. In particular,
+preconditioning only targets eigensolve cost, not Gram construction/projection.
+
+## Optimized projector and explicit precision checkpoint
+
+The operator's full 200-frame result exposed the original baseline's cost:
+image Gram filtering ~2280 ms and channel Gram filtering ~2149 ms. JSON stage
+medians isolated ~902/815 ms in covariance construction, ~6 ms in EVD and
+~1395/1325 ms in full retained-subspace projection. Individual stage medians do
+not have to add to combined medians. Preconditioning a 6 ms eigensolve cannot
+solve the dominant cost; earlier "optimized Gram" terminology was premature.
+
+The current implementation removes that redundant large projection. For fixed
+orthonormal V, it chooses the smaller of retained and discarded subspaces:
+`X_f = X V_r V_r^H` or `X_f = X - X V_c V_c^H`. Retaining `[2, 200)` projects two
+columns, not 198. Full/empty/middle bands and noncontiguous inputs are covered.
+This reduces projection multiplication work, not covariance work, and does not
+by itself imply a measured end-to-end speedup.
+
+Image PD reduces chunked residual IQ directly without allocating the full
+filtered IQ volume. It does **not** subtract nearly equal total and clutter
+energies; a constructed 1e8:1 amplitude fixture demonstrates why that loses weak
+power. Residual arithmetic follows the chosen precision; real/imaginary squares
+and power accumulation are float64, normalized by original T. Channel filtering
+still reconstructs T channel frames before full-frame OPW. Component-space OPW
+and any precision/sampling fallback remain unimplemented.
+
+This checkpoint initially kept one full complex128 SVD reference and optimized
+Gram in complex128/complex64 per domain (six rows total; expanded below). The reference obtains
+spatial U in cuSOLVER's overwritten input copy and reconstructs `U Sigma V^H`
+with discarded singular values zeroed; no complementary shortcut is used in the
+reference. The independent NumPy SVD reference likewise reconstructs from U/S/Vh.
+Basis-only tall-matrix SVD retains its temporal-vectors-only allocation behavior. Previous
+full-retained-projector benchmark variants are removed rather than retained as
+extra rows.
+
+Gram precision is explicit; complex128 remains the default. Global maximum
+real/imaginary component scaling and row normalization bound the covariance.
+Componentwise real division avoids overflow in complex division itself, and
+normalization promotes to float64 before division for complex128 work. Subnormal
+float32 amplitude scaling also uses real float64 division before the explicit
+complex64 cast. Diagnostics record the normalized covariance's minimum
+eigenvalue, negative count and dtype-dependent tolerance; small negatives are
+clipped before square root, significant negatives/nonfinite decompositions fail.
+Returned singular values are float64, rescaled to the original input units.
+
+Negative **eigenvalues**, not singular values, are the relevant finite-precision
+failure: Hermitian is not sufficient for PSD. Scaling prevents amplitude
+under/overflow, not squared-condition-number loss. An adversarial 24x6 complex128
+fixture with singular values `[1e5, 2, 1, .3, .1, .01]`, retaining `[1, 5)`, showed
+~3.3e-6 relative IQ error for Gram128 versus direct SVD, but ~44.5% for Gram64,
+with two roundoff-negative eigenvalues and otherwise finite arithmetic. This is
+a numerical stress fixture, not a physiological sensitivity benchmark.
+
+Output stays compact: total/filter time, PD relative-L2 error against SVD128,
+and sampled component fractions. The fractions are evaluated with each estimated
+projector in CPU complex128; they do not validate complex64 arithmetic. Optional
+JSON includes peak-normalized maximum PD error, clipping diagnostics, projector
+size, per-stage/trial timing and telemetry. Relative-L2 or peak-normalized maximum
+PD error >0.5% is an engineering warning, not a clinical quality threshold.
+Numerical EVD64 failures are labeled failed, memory limits skipped; neither falls
+back. Image filter timing includes its PD reduction; comparisons to earlier
+filter-only stage timings must account for that boundary change.
+
+Proof: **246 tests pass**; **68 GPU/scene tests under CUDA memcheck report zero
+errors**. Focused Ruff formatting/lint, ty and diff checks pass. End-to-end tests
+exercise both precisions and the SVD reference at 16 and 200 frames, compact
+terminal/optional JSON output, explicit memory skips, numerical failures and
+visible precision warnings. Projector-size checks prove the 200-frame high-pass
+uses two modes; overflow/subnormal, weak-band and residual-power cancellation
+fixtures cover the numerical changes. No full-size timing claim is made.
+
+Next operator checkpoint (full-size speedup deliberately not inferred from tests):
+
+```bash
+PYTHONPATH=examples uv run python -m _support.clutter_benchmark \\
+  --rank-start 2 --output /tmp/clutter-optimized.json
+```
+
+Inspect actual PD errors and covariance/application costs before selecting a
+precision or attempting temporal-component OPW. Acquired-data weak-flow
+sensitivity remains unvalidated.
+
+## Direct SVD64 comparison
+
+Added SVD64 as a precision control alongside SVD128, Gram128 and Gram64 in both
+domains (eight rows). This helps separate single-precision loss from the extra
+conditioning loss caused by forming `X^H X`. SVD128 remains the sole gold
+reference and the default direct-SVD precision; no defaults or cutoffs change.
+
+Both direct precisions use the same full-SVD, zero-singular-values reconstruction,
+with cuSOLVER `cgesvd`/`zgesvd` and matching workspace/value dtypes. Basis-only,
+wide-matrix and shared RC/CR paths also accept explicit complex64. Nonfinite
+complex128-to-complex64 casts fail before entering the solver. SVD64 numerical
+failures and PD-error warnings follow the same explicit reporting as Gram64,
+without fallback. All PD errors remain relative to same-domain SVD128.
+
+On the preceding adversarial weak-band fixture, relative filtered-IQ errors
+against independent NumPy SVD were ~6.6e-12 (SVD128), **0.180% (SVD64)**,
+~3.3e-6 (Gram128), and **44.5% (Gram64)**. This illustrates the conditioning
+difference, not universal SVD64 safety or physiological sensitivity.
+
+Proof: **256 tests pass**, including wide/tall/single-frame, noncontiguous,
+shared-input, full/empty-band, solver-failure and cast-overflow checks.
+**78 GPU/scene tests pass CUDA memcheck with zero errors**; focused Ruff and ty
+checks pass. The existing full benchmark command now includes SVD64 automatically;
+full-size timings remain for the operator.
+
+## Operator full-size optimized filtering result
+
+Source: operator run and `/tmp/clutter-optimized.json` (local artifact, not bundled
+in the repository), three warmed randomized/interleaved trials per case:
+
+```bash
+PYTHONPATH=examples uv run python -m _support.clutter_benchmark \\
+  --rank-start 3 --output /tmp/clutter-optimized.json
+```
+
+200 frames at 500 Hz represent a 400 ms nonoverlapping slow-time ensemble.
+Retained interval `[3,200)` is the operator's explicit synthetic cutoff, not an
+automatic/clinical default. Unfiltered fused-PD OPW median: **1424.50 ms**.
+
+| Pipeline | Total ms | Filter ms | PD relative-L2 error vs same-domain SVD128 | Tissue power left | Blood power kept |
+|---|---:|---:|---:|---:|---:|
+| Image SVD128 | 5966.55 | 4500.29 | reference | 3.673% | 97.89% |
+| Image SVD64 | 2050.15 | 576.91 | 0.00345% | 3.673% | 97.89% |
+| Image EVD128 | 2582.35 | 1110.76 | 4.44e-7% | 3.673% | 97.89% |
+| Image EVD64 | 1592.23 | 114.31 | 6.91e-5% | 3.673% | 97.89% |
+| Channel SVD128 | 5650.99 | 4176.89 | reference | 3.253% | 97.93% |
+| Channel SVD64 | 1982.79 | 433.03 | 0.00353% | 3.253% | 97.93% |
+| Channel EVD128 | 2523.30 | 1039.36 | 6.77e-11% | 3.253% | 97.93% |
+| Channel EVD64 | 1573.46 | 98.51 | 3.84e-5% | 3.253% | 97.93% |
+
+Both EVD precisions had zero negative Gram eigenvalues in warm and timed trials.
+EVD64 is faster and closer to SVD128 PD than direct SVD64 **in this dominant-only
+removal case**, not universally. Clocks vary across algorithms; these are actual
+pipeline measurements, not isolated precision-throughput ratios. Prior rank-2
+runs and earlier hardware conditions are not controlled same-workload speedups.
+The 19 ms image/channel total difference is too small to declare a domain winner.
+
+| EVD64 stage median | Image ms | Channel ms |
+|---|---:|---:|
+| Raw H2D | 137.04 | 123.60 |
+| OPW reconstruction | 1323.37 | 1320.93 |
+| Gram construction | 64.05 | 55.39 |
+| Eigensolve | 2.25 | 2.28 |
+| Filter application | 39.51 | 32.91 |
+
+Individual stage medians need not add to combined/total medians. Image filtering
+includes its PD reduction; channel PD is a separate ~13.09 ms stage. Packing,
+workspace, validation and allocation/cleanup also count in complete time.
+The fastest total is **3.93x** the 400 ms budget; reconstruction alone is **3.30x**
+that entire budget. Eliminating filtering cannot reach real time.
+
+The similar domain sizes explain their similar costs:
+
+- RC: `(368 * 80 * 16, 200) = (471040, 200)`; CR is the same.
+- Shared channel basis: conceptually `(942080, 200)`, **1.404 GiB** complex64;
+  Gram construction sums RC/CR products without full concatenation.
+- Image: `(80 * 157 * 80, 200) = (1004800, 200)`, **1.497 GiB** complex64,
+  only **6.66%** more rows than the combined channels.
+- Both Gram matrices are `200 x 200`; discarded tissue basis is `200 x 3`.
+  Both current pipelines still beamform all 200 frames. Complex128 full-input
+  copies double the listed input storage, excluding additional workspace.
+
+Component fractions use sampled noiseless components and each estimated basis,
+not image purity. From sampled RMS/retention, residual tissue component power is
+still ~1.3–1.4x retained blood power; cross-terms mean mixture PD is not simply
+the sum of component PD. Small whole-PD error does not establish weak-flow accuracy.
+
+## LLM conditioning/HERK report: assessment and bounded candidates
+
+The operator supplied a numerical-analysis report recommending HERK, dominant
+subspace removal, accumulation changes, deflation, QR/TSQR and randomized SVD.
+Treat these as hypotheses and distinguish stability from performance:
+
+- **Already implemented:** explicit Hermitian symmetrization, Hermitian `eigh`,
+  global amplitude scaling, selectable covariance precision, and smaller-subspace
+  filtering. Global scaling prevents amplitude under/overflow, not conditioning.
+  Hermitian symmetry does not guarantee PSD; clipping small negatives is not
+  recovery of lost spectral information.
+- **HERK:** [NVIDIA cuBLAS section 2.7.14](https://docs.nvidia.com/cuda/cublas/index.html#cublas-t-herk)
+  specifies one-triangle `alpha A^H A + beta C` for conjugate-transpose mode.
+  It can avoid computing both triangles and the explicit symmetrization pass,
+  but still squares the condition number. No guaranteed 2x speedup or improved
+  weak-mode accuracy. Triangle storage still uses a dense buffer; input storage
+  is not halved. Current row-major chunks require correct column-major/conjugation
+  handling; count any copy/conversion. Never average an uninitialized triangle
+  into the computed one. Compare both precision variants, then retain only wins.
+- **Eigensolver:** inspected installed CuPy: the current two-dimensional CUDA
+  `eigh` path already uses one-triangle cuSOLVER `xsyevd`. Calling `Cheevd` directly
+  is not automatically a different/better algorithm and only targets ~2.3 ms here.
+- **Dominant projector versus weak spectrum:** perturbations relative to the
+  cutoff's spectral gap matter. Inaccurate small eigenvalues need not imply a bad
+  dominant tissue projector, but small projector errors acting on strong tissue
+  can still overwhelm weak residual blood. An upper noise cutoff additionally
+  requires weak-mode separation. Inspect filtered IQ/weak-component errors, not
+  just negative counts, eigenvalues or global PD norms.
+- **Corrected stress-fixture interpretation:** on the same 24x6 fixture above,
+  `[1,5)` gives SVD64 **0.180%** versus EVD64 **44.5%** relative filtered-IQ error;
+  removing only the dominant mode, `[1,6)`, gives SVD64 **0.195%** versus EVD64
+  **0.510%**. The latter was an ad hoc numerical check, not a new automated gate
+  or acquired-data result. Do not use the upper-cutoff stress failure to label
+  every EVD64 high-pass filter unusable.
+- **FP32 arithmetic/accumulation:** verify effective cuBLAS compute/math settings
+  and any TF32 override before attributing errors to IEEE FP32 alone. FP64 summation
+  of FP32 partial Grams only improves inter-chunk summation; it cannot recover
+  errors inside each product. Casting an already rounded Gram to FP64 is not a
+  precision remedy. HERK likewise is not proof of full-mantissa multiplication.
+- **QR/TSQR plus small SVD:** avoids explicit normal equations and is a plausible
+  accuracy/performance alternative if needed. Retain only compact R factors,
+  count all passes/layout/workspace, and avoid materializing huge Q. It is not
+  implemented or established as faster than native direct SVD for this workload.
+- **Residual deflation/refinement:** another pass on `R = X - X V_r V_r^H` may
+  improve resolution of weaker modes, but adds input passes and is limited by
+  initial subspace/projection cancellation errors. Not needed merely to discard
+  three dominant components already matching SVD128 closely.
+- **Explicit semantics required:** mean removal and spatial normalization/whitening
+  change the estimated filter. New upper cutoffs and randomized subspaces require
+  declared semantics/error budgets, not silent substitution. Adding a scalar
+  diagonal shift leaves exact eigenvectors unchanged and cannot repair the desired
+  projector.
+
+Relevant reference: Theo Mary, *Error Analysis of the Gram Low-Rank Approximation
+(and Why it is Not as Unstable as One May Think)*, SIAM J. Matrix Anal. Appl. 46(2),
+1444–1459 (2025), [DOI 10.1137/24M1687649](https://doi.org/10.1137/24M1687649).
+Publication metadata/abstract were checked; direct full-text fetch failed. Do not
+claim its low-rank-approximation bounds guarantee a small relative error in our
+weak clutter-filtered residual without checking the theorem assumptions and norm.
+The earlier IUS preconditioning report remains documented in step 6; present
+measurements deprioritize it because decomposition is not the bottleneck.
 
 ## Retained implementation
 
@@ -322,7 +961,10 @@ Local artifacts: `/tmp/rcabeam-current-{fp32,fp16}-center30.ncu-repz`,
 `/tmp/rcabeam-current-stage-times.nsys-rep`, and
 `/tmp/rcabeam-native-layout-{float32,float16}.log`.
 
-## Next, only with evidence
+## Historical post-Nsight recommendations
+
+Superseded in priority by the current execution plan at the top; retained here
+as context for the measurements that preceded the clutter-filtering discussion.
 
 - Prioritize a bounded RCA tensor-core prototype to reduce scalar FMA work and
   share IQ loads across neighboring voxels; include grouping/conversion costs
@@ -332,6 +974,64 @@ Local artifacts: `/tmp/rcabeam-current-{fp32,fp16}-center30.ncu-repz`,
 - Profile genuine asynchronous loading or shorter accumulation chains before
   introducing another pipeline or changing interpolation precision.
 - Validate FP16 storage on acquired data; reserve H200 for final validation.
+
+## Review-driven OPW accumulator, tail and phase experiments
+
+Same five-target RCA workload on the RTX 5080 Laptop, but the GPU now reports
+an enforced **55 W cap**, not the earlier 80 W. No power/permission settings
+were changed. These are same-run comparisons, not regressions against earlier
+absolute timings. Desktop activity, variable clocks and thermals still qualify
+small differences. The temporary monitor allowed the verified Obsidian Electron
+GPU process in addition to the usual desktop applications; other compute workers
+remained rejected.
+
+Temporary nvcc `-O3 -lineinfo -Xptxas=-v`, sm_120 libraries compared the original
+kernel, one RC/CR accumulator, register phase shuffles, and their combination.
+The eight-frame tail also used 4- and 2-voxel mappings with minimum legal
+16- and 32-frame template batches; unused frame pairs remained guarded.
+Nine randomized/interleaved CUDA-event trials per precision timed central tile
+30, ten repeated launches per case, excluding geometry, clearing and packing.
+
+| Original-accumulator tail mapping | FP32 median/tile | FP16 median/tile |
+| --- | ---: | ---: |
+| 8 voxels/warp, batch 8 (retained) | 2.851 ms | 2.261 ms |
+| 4 voxels/warp, batch 16 | 3.048 ms | 3.224 ms |
+| 2 voxels/warp, batch 32 | 5.835 ms | 4.997 ms |
+
+Short-tail accumulator/shuffle differences were clock-sensitive and did not
+establish a repeatable win. A follow-up used seven randomized/interleaved
+full-volume trials per precision, reusing packed data and preallocated buffers.
+Host wall timing included all 62 voxel tiles, geometry, PD clearing, main/tail
+kernels and the original finish launches, but excluded packing, transfers and
+canonical output restoration. IQ output remained enabled for every variant.
+
+| Full-volume variant | FP32 median | FP16 median |
+| --- | ---: | ---: |
+| Original kernel | 1860.55 ms | 1772.13 ms |
+| One RC/CR accumulator | 1900.12 ms | 1818.34 ms |
+| Register phase shuffles | 1971.84 ms | 1774.04 ms |
+
+One accumulator reduced main registers/thread from 64 to **59 FP32 / 60 FP16**,
+with zero spills, but did not improve time. Phase shuffles retained 64 registers.
+SASS inspection found fewer static instructions in both variants, but unchanged
+vector IQ-load and FFMA instruction counts; fewer instructions/registers alone
+were not a throughput win. Fresh Nsight Compute collection failed with
+`ERR_NVGPUCTRPERM`, so there are no new scheduler/stall-counter conclusions.
+
+All central-tile candidate IQ/power outputs matched the original within 5e-5
+peak-relative tolerance. Full-volume checks used 1024 deterministic sampled
+voxels/all frames plus a full-output finiteness check: single-accumulator IQ
+maximum error was at most 2.47e-6 of the reference peak; shuffle comparisons
+were exact in those checks. This is synthetic parity, not acquired-flow proof.
+
+**Retained:** only skip `finish` for methods 0, 2 and 3, preserving it for 1 and
+4 and preserving launch-error checks. No kernel tuning options or experimental
+kernels were added. Independent NumPy tail tests now cover 2/4/6/8 frames,
+64/66/68/70/72 frames and the 200-frame workload with 1/17 channels and odd voxel
+counts. All 137 tests pass; focused 42-test CUDA memcheck reports zero errors.
+Local reproducible harnesses, sources, build/SASS logs, raw timing/telemetry JSON
+and validation logs: `/tmp/rcabeam-opw-review/`. These temporary artifacts are
+not shipped; this checkpoint preserves the measured conclusions.
 
 ## Experimental paper-inspired two-stage OPW checkpoint
 
