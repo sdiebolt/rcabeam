@@ -15,15 +15,30 @@ from .gpu_monitor import monitor_gpu
 VARIANTS = ("svd128", "svd64", "gram128", "gram64")
 
 
-def filtered_opw(raw, scene, *, domain: Literal["beamformed", "channel"], variant, rank_start, rank_stop):
+def filtered_opw(
+    raw,
+    scene,
+    *,
+    domain: Literal["beamformed", "channel"],
+    variant,
+    rank_start,
+    rank_stop,
+    density: float | None = None,
+    frame_chunk: int = 32,
+):
     """Full-cost reference or optimized pipeline, including allocations/transfers.
 
     Gram image PD uses chunked residual power without full filtered IQ storage.
-    Channel filtering still reconstructs T frames before OPW. Peak bytes track
-    active CuPy-pool allocations only, not driver/cuBLAS allocations.
+    Channel filtering still reconstructs T frames before OPW. Optional density
+    selects the experimental two-stage channel-filtered reconstruction only.
+    Peak bytes track active CuPy-pool allocations, not driver/cuBLAS allocations.
     """
     if domain not in ("beamformed", "channel") or variant not in VARIANTS:
         raise ValueError("Unknown filter domain or variant")
+    if density is not None and domain != "channel":
+        raise ValueError("Two-stage comparison supports channel filtering only")
+    if density is not None and (not np.isfinite(density) or density < 2):
+        raise ValueError("Density must be finite and >=2")
     start, stop = _rank_interval(raw[0].shape[-1], rank_start, rank_stop)
     pool = cp.cuda.MemoryPool()
     peak_bytes = 0
@@ -73,11 +88,29 @@ def filtered_opw(raw, scene, *, domain: Literal["beamformed", "channel"], varian
             gpu, values, basis = filter_data(gpu, power_only=False)
             pool.free_all_blocks()
             mark("clutter_seconds")
-        workspace = OpwWorkspace(raw[0].shape, scene.angles, 2e-6, scene.grid, scene.geom)
-        mark("workspace_seconds")
-        workspace.pack(gpu[0], gpu[1])
-        mark("packing_seconds")
-        iq = workspace.reconstruct()
+        if density is None:
+            workspace = OpwWorkspace(raw[0].shape, scene.angles, 2e-6, scene.grid, scene.geom)
+            plane_depths = scratch_bytes = None
+            mark("workspace_seconds")
+            workspace.pack(gpu[0], gpu[1])
+            mark("packing_seconds")
+            iq = workspace.reconstruct()
+        else:
+            from rcabeam.two_stage import TwoStageOpwWorkspace
+
+            workspace = TwoStageOpwWorkspace(
+                raw[0].shape,
+                scene.angles,
+                2e-6,
+                scene.grid,
+                scene.geom,
+                samples_per_wavelength=density,
+                frame_chunk=frame_chunk,
+            )
+            plane_depths, scratch_bytes = len(workspace.plane_depths), workspace.scratch_bytes
+            mark("workspace_seconds")
+            stages["packing_seconds"] = 0.0
+            iq = workspace.reconstruct(*gpu)
         del workspace, gpu
         pool.free_all_blocks()
         mark("beamforming_seconds")
@@ -99,6 +132,9 @@ def filtered_opw(raw, scene, *, domain: Literal["beamformed", "channel"], varian
     pool.free_all_blocks()
     return {
         "power": host,
+        "samples_per_wavelength": density,
+        "plane_depths": plane_depths,
+        "two_stage_scratch_bytes": scratch_bytes,
         "basis": host_basis,
         "singular_values": host_values,
         "total_ms": total * 1e3,

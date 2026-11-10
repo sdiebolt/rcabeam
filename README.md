@@ -27,8 +27,15 @@ with `cmake.define.CMAKE_CUDA_ARCHITECTURES` when installing through `uv pip`.
 ## Benchmark and visualize
 
 ```bash
-# Every RCA method, including two-stage OPW, in one Rich results table.
+# Existing all-method reconstruction benchmark (unchanged default).
 uv run examples/benchmark.py
+# All three suites, one optional detailed report; cutoff is explicit.
+uv run examples/benchmark.py --suite all --rank-start 3 --output /tmp/rcabeam-benchmark.json
+# Focused runs use the same entrypoint.
+uv run examples/benchmark.py --suite clutter --rank-start 3
+uv run examples/benchmark.py --suite pipeline --rank-start 3
+# Add the adversarial precision envelope to the clutter suite (both source dtypes).
+uv run examples/benchmark.py --suite clutter --rank-start 3 --extended-clutter
 
 # Every RCA method in one napari viewer; FPM is included when installed.
 uv run examples/visualize.py
@@ -39,16 +46,41 @@ uv run examples/visualize.py --headless
 uv run python examples/storage_estimate.py
 ```
 
-The benchmark has no suite, method-selection, or configuration arguments. It runs
-OPW, two-stage OPW, XDoppler, RC-FMAS, St-SW, and DMAS-CCF-ACF on the same inputs.
-The mach FPM reference is included automatically when installed, otherwise shown
-as skipped. Results report the best of three warmed trials, paired raw-upload
-time, and RCA speed relative to OPW. Two-stage uses 8 samples/wavelength and
-32-frame chunks; its approximation and synthetic power RMS error are visible
-in the table. Density/PSF sweeps and verbose JSON are not part of this command.
+`benchmark.py` is the common entrypoint; suites reuse the implementations in
+`_support` rather than duplicate timing or numerical checks:
 
-Only `benchmark.py`, `visualize.py`, and `storage_estimate.py` are top-level
-scripts. Shared implementation and specialized research harnesses live under
+| `--suite` | Scope |
+|---|---|
+| `reconstruction` (default) | All unfiltered RCA methods, with automatic optional mach FPM reference |
+| `clutter` | Synthetic component diagnostics and SVD128/SVD64/EVD128/EVD64 filtering in image/channel domains |
+| `pipeline` | Conventional versus two-stage 8/16/32 after matched EVD64 channel filtering |
+| `all` | All three suites, in that order |
+
+Filtering requires `--rank-start`; `--rank-stop` defaults to the original frame
+count. No automatic cutoff is selected. Shared `--grid`, `--elements`, `--angles`,
+`--frames`, and `--repeat` settings apply to the RCA acquisition in each suite.
+`--density` and `--frame-chunk` configure only the pipeline's two-stage candidates;
+the reconstruction reference retains density 8/chunk 32. `--extended-clutter` adds
+both complex64/complex128 source precision envelopes with their own fixed default
+256-row, 32-frame, three-seed fixtures, not the acquisition dimensions above.
+
+Reconstruction retains its paired best-of warmed trials; clutter and pipeline
+retain warmed randomized/interleaved medians. Optional `--output` writes one strict
+JSON report with separate suite results, available stages, trials, checks and
+telemetry; terminal output stays compact. The optional FPM reference retains its
+paired-best summary only. Targets remain distinct: 400 ms reconstruction-only
+versus 400 ms complete host-input-to-host-PD including filtering, for the original
+200-frame/500 Hz workload. No approximation or clinical acceptance is inferred.
+
+Without arguments, reconstruction still runs OPW, two-stage OPW, XDoppler,
+RC-FMAS, St-SW, and DMAS-CCF-ACF on the same common-phase inputs. The mach FPM
+reference is automatic when installed, otherwise shown as skipped. Results show
+paired upload time and RCA speed relative to OPW; two-stage approximation and
+synthetic power RMS error remain visible. Isolated PSF sweeps stay in research
+modules.
+
+The supported top-level entrypoints are `benchmark.py`, `visualize.py`, and
+`storage_estimate.py`. Shared implementation and specialized research harnesses live under
 `examples/_support/`. The viewer also has no method or comparison selectors;
 its only operational option is `--headless` for a compute-only check.
 Visualization uses the same default acquisition but only one frame, then opens
@@ -66,8 +98,8 @@ FPM retains **32×32 receivers, 96 µm lateral spacing, and five waves
 (0°, ±3° along x/y)**; this adapts the paper's lateral grid/sequence, not its
 probe physics or acquired dataset. IQ uses **20 MS/s, 15 MHz full −6 dB
 bandwidth, and at least 368 samples**, extending the receive window when needed.
-The everyday benchmark fixes this workload; custom geometry belongs in the
-research harnesses below. The volume viewer uses matched RCA/FPM axes for visual
+The default benchmark uses this workload; shared dimension flags support smaller
+checks, while specialized geometry experiments remain in the research harnesses. The volume viewer uses matched RCA/FPM axes for visual
 comparison. Storage defaults use the benchmark grids and float32 PD.
 
 Timings exclude simulation, first-use compilation and validation, but include
@@ -82,8 +114,9 @@ coherently compounded chunk, saving the default **2.22 GB** full-IQ buffer.
 
 ### Specialized research harnesses
 
-These are separate from the no-argument benchmark; their timing boundaries,
-numerical checks, and precision guards are retained:
+Advanced/compatibility module entrypoints remain available; their timing boundaries,
+numerical checks, and precision guards are retained. Prefer `benchmark.py --suite`
+for routine reconstruction, clutter and complete-pipeline comparisons:
 
 ```bash
 # Detailed single-frame/staged diagnostics or opt-in FP16 storage experiments.
@@ -100,7 +133,7 @@ PYTHONPATH=examples uv run python -m _support.matrix_chunks --sequence s4
 PYTHONPATH=examples uv run python -m _support.clutter_benchmark
 # SVD128 reference vs SVD64 and optimized EVD128/EVD64 in both domains.
 # Rank 2 is an illustrative synthetic cutoff, not a clinical default.
-PYTHONPATH=examples uv run python -m _support.clutter_benchmark --rank-start 2 --output /tmp/clutter-filtered.json
+uv run examples/benchmark.py --suite clutter --rank-start 2 --output /tmp/clutter-filtered.json
 # Optional scene-only detailed report (kept out of terminal output).
 PYTHONPATH=examples uv run python -m _support.clutter_benchmark --output /tmp/clutter-details.json
 # Quick scene smoke before running the full default acquisition.
@@ -159,6 +192,86 @@ flow/motion simulation or acquired-data validation; source amplitude ratios are
 not prescribed beamformed SNR. The spectrum's 0.1% reporting threshold is only a
 diagnostic, not a filtering cutoff. Full-size filtered timings are left to the
 operator; the small smoke can also use `--rank-start 2`.
+
+**Numerical accuracy envelope:** `_support.clutter_accuracy` is a separate small
+IQ-domain sweep, not an OPW timing or physiological benchmark. It compares native
+GPU SVD128/SVD64 and optimized EVD128/EVD64 against an independent NumPy complex128
+SVD reference. Defaults are 256 rows, 32 frames and three seeds. Controlled-spectrum
+fixtures vary tissue/blood Frobenius amplitude ratios `10, 1e3, 1e5, 1e7` and
+cutoff singular-value ratios `2, 1.01, 1.000001`; a separate overlapping-factor
+fixture avoids enforced tissue/blood orthogonality. Three tissue and five blood
+factors are test choices, not a claim about acquired-data rank.
+
+Fixed retained bands `[3,T)`, `[3,T//2)`, `[3,8)` separate dominant-only removal
+from upper cutoffs and expose retained-K tradeoffs. Each basis comes from the
+mixture. Native SVD mixture outputs reconstruct full U/S/Vh; component probes use
+that mixture basis with optimized projection for every method. Probes are not an
+additive decomposition of native SVD reconstruction roundoff. IQ/PD errors use
+the filtered reference norm; blood-probe error and numerical tissue error use the
+**input blood IQ norm**, so a strong tissue denominator cannot hide leakage.
+Tissue basis/projector error is recorded separately from application arithmetic.
+Reference component-retention ranges describe filter choice, not arithmetic error.
+
+```bash
+# Small default envelope; only compact worst-case/retention tables print.
+PYTHONPATH=examples uv run python -m _support.clutter_accuracy --output /tmp/clutter-accuracy-small.json
+# Operator checkpoint: 200 frames, repeat for high-precision and stored-complex64 inputs.
+for dtype in complex128 complex64; do
+  NVIDIA_TF32_OVERRIDE=0 CUPY_TF32=0 PYTHONPATH=examples uv run python -m _support.clutter_accuracy \\
+    --rows 512 --frames 200 --input-dtype "$dtype" --output "/tmp/clutter-accuracy-$dtype.json"
+done
+```
+
+`--input-dtype complex128` isolates algorithm precision without an initial
+complex64 cast; `complex64` tests the acquisition format. Input-mixing roundoff is
+recorded separately against blood strength. Optional strict JSON adds per-case
+errors, seeds, measured gaps/leading-subspace conditioning, spectra, Gram negative
+eigenvalues, basis-versus-arithmetic errors, retention and math-mode/environment
+metadata; no arrays or spectra are dumped to the terminal. Solver/memory/basis
+failures are explicit, with no fallback. Table errors are maxima across trials
+of different strengths/gaps/seeds, not averages, and need not share a worst case.
+`Fail` counts backend failures, not an accuracy acceptance threshold. Null relative
+errors indicate a zero reference norm, never a silently chosen epsilon. Near an
+ambiguous cutoff, inspect CPU/GPU SVD128 disagreement as well. Small matrices do
+not certify million-row accumulation or acquired weak-flow sensitivity; there is
+no automatic production precision/rank selection.
+
+**Matched two-stage clutter validation:** `_support.two_stage_clutter` compares
+conventional OPW and the existing approximate two-stage densities 8/16/32 after
+shared-RC/CR EVD64 channel filtering. It does not change any reconstruction or
+filter default, or mix in image-domain basis changes.
+
+```bash
+# Full-size operator checkpoint: 200 frames, original grid/acquisition, three trials.
+NVIDIA_TF32_OVERRIDE=0 CUPY_TF32=0 uv run examples/benchmark.py --suite pipeline \
+  --rank-start 3 --output /tmp/two-stage-clutter.json
+# Small integration smoke; not representative throughput or quality evidence.
+uv run examples/benchmark.py --suite pipeline \
+  --grid 3 --elements 4 --angles 2 --frames 7 --rank-start 2 \
+  --density 8 16 --frame-chunk 3 --repeat 1
+```
+
+Quality checks estimate one mixture basis, then feed **identical filtered GPU
+arrays** to every reconstruction for mixture, tissue, blood and noise separately.
+Full-volume complex-IQ/PD errors expose phase and spatial errors, not just total
+power. Blood power is relative to conventional **filtered** blood; tissue
+reconstruction error uses that filtered blood IQ norm as its denominator. This
+isolates reconstruction error, not EVD64-versus-SVD128 error, filter retention
+against unfiltered blood, or acquired-flow sensitivity. Power always divides by
+original T. A sampled NumPy DAS check verifies the conventional filtered reference.
+
+Warmed randomized/interleaved timing rows independently pay for basis estimation,
+filter application, allocations/layout, raw H2D, reconstruction, PD and PD D2H.
+Their projectors and PD are checked against the fixed-filter quality run; diagnostics
+and warm-up are outside timing. Optional strict JSON contains component errors,
+local blood sqrt-PD axis profiles/widths/peak shifts, bases/spectra, trial stage
+costs, active CuPy-pool peaks and telemetry. Profiles contain multiple targets;
+they are not isolated-target PSFs. Null widths mean unresolved/clipped profiles;
+null relative errors mean a zero reference norm. Candidate memory failures are
+explicit skips and timed numerical failures are labeled; failure to establish the
+shared basis/reference aborts the comparison. No smaller density/chunk/precision
+is silently substituted. There is no automatic approximation acceptance threshold.
+The full-size 400 ms throughput/quality decision remains an operator checkpoint.
 
 The everyday benchmark also rejects overlapping compute workers. The chunk
 tuner uses interleaved full-pipeline medians and checks output parity;

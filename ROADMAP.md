@@ -14,6 +14,8 @@ This execution order supersedes the historical "next" recommendations below.
 Completed checkpoints below distinguish implemented filters/baselines from
 future temporal compression, preconditioning and reconstruction experiments.
 Preserve the current unfiltered reconstruction benchmark and APIs as references.
+Routine runs now use `examples/benchmark.py --suite reconstruction|clutter|pipeline|all`;
+no arguments preserve reconstruction. Filtering requires an explicit rank cutoff.
 The historical 400 ms goal is **before filtering**; keep it distinct from the
 current complete-pipeline throughput objective above.
 
@@ -26,17 +28,27 @@ the gold reference, and the library's complex128 default is unchanged.
 
 1. **Freeze the measured reference and precision/quality checks.** Preserve the
    eight-row benchmark, explicit rank bounds, stage timings and optional JSON.
-   Add a small targeted sweep of tissue/blood dynamic range and the spectral gap
-   at the cutoff. Compare dominant-only removal separately from upper-cutoff
-   filtering; measure weak-component residual/IQ errors as well as whole-PD error.
-   Do not accept a precision for acquired-data use from this synthetic scene alone.
-2. **Make structural OPW work the main performance track (step 7).** Reconstruction
-   is ~1.32 s versus ~0.10 s EVD64 filtering. Finish fresh source-attributed main/
-   tail profiling to locate dependent gathers/interpolation stalls, then choose
-   one exact, bounded sample-sharing/data-reuse experiment with a stated mechanism.
-   Include grouping/conversion costs and independent IQ/PD parity. Earlier blind
-   accumulator, shuffle and tail changes did not win; do not repeat them unchanged.
-   Keep hardware power/security settings unchanged without explicit authorization.
+   The targeted sweep is implemented in `_support.clutter_accuracy` (checkpoint
+   below). The operator completed 512-row, 200-frame checks with both source
+   dtypes and three seeds. The initial numerical-envelope checkpoint is complete:
+   separate high-pass/upper-cutoff behavior, dominant-subspace conditioning,
+   source rounding and tissue leakage are measured. This is not universal or
+   acquired-data precision acceptance; full acquisition/grid validation remains
+   separate. Next main performance action is item 2.
+2. **Validate the existing two-stage approximation before another conventional
+   OPW micro-optimization (step 7).** Reconstruction is ~1.32 s versus ~0.10 s
+   EVD64 filtering. `_support.two_stage_clutter` now compares densities 8/16/32
+   against conventional OPW with identical channel-filtered inputs for quality;
+   complete timed pipelines independently include the same EVD64 filter. Measure
+   blood preservation, tissue error relative to blood, spatial effects and full
+   host-input-to-host-PD cost. The full-size operator checkpoint remains pending;
+   visual unfiltered similarity is not acceptance. Only afterward consider
+   image-domain filtering, which also changes the estimated basis. Do not combine
+   this approximation with temporal compression yet. If quality/time is inadequate,
+   resume source-attributed main/tail profiling and one exact, bounded sample-sharing/
+   data-reuse experiment including layout costs and independent IQ/PD parity.
+   Earlier blind accumulator, shuffle and tail changes did not win; do not repeat
+   them unchanged. Keep power/security settings unchanged without authorization.
 3. **HERK is a secondary bounded microbenchmark**, not a conditioning fix. Compare
    `Cherk`/`Zherk` against GEMM with the same normalized inputs and precision,
    correct conjugation/triangle semantics, and all layout costs. Require a repeatable
@@ -642,6 +654,282 @@ claim its low-rank-approximation bounds guarantee a small relative error in our
 weak clutter-filtered residual without checking the theorem assumptions and norm.
 The earlier IUS preconditioning report remains documented in step 6; present
 measurements deprioritize it because decomposition is not the bottleneck.
+
+## EVD64 accuracy-envelope checkpoint
+
+Added `_support.clutter_accuracy` and `tests/test_clutter_accuracy.py`, without
+changing production filtering, public defaults, scene/timing benchmarks or rank
+selection. This is an IQ-domain numerical validation experiment, not an OPW
+performance or acquired-data benchmark.
+
+The default sweep uses 256 rows, 32 frames, seeds 42–44, and two fixture families:
+
+- Controlled orthogonal factors with exact pre-rounding tissue/blood Frobenius
+  amplitude ratios `10, 1e3, 1e5, 1e7` and boundary singular-value ratios
+  `sigma[2]/sigma[3] = 2, 1.01, 1.000001`. The largest tissue mode adjusts to meet
+  the requested amplitude ratio; the boundary tissue modes remain near blood.
+  This deliberately tests conditioning of the retained/dropped subspaces, not
+  merely uniform scaling of an otherwise identical spectrum.
+- Independent spatial factors with overlapping slow tissue/AR(1) blood temporal
+  factors and full-rank complex noise (noise/blood amplitude 0.1). No orthogonal
+  tissue/blood separation is imposed. Temporal fixture PRF is 500 Hz.
+
+Both families have three tissue and five blood factors by construction. These are
+algebraic test choices, not physiological rank claims. Fixed bands `[3,T)`,
+`[3,T//2)`, `[3,8)` compare dominant-only removal with upper cutoffs and retained-K
+tradeoffs; duplicate bands are omitted for small T. At 200 frames, K is 197, 97,
+or 5. No useful acquired-data K is inferred from these factors.
+
+All four GPU variants are checked against independent NumPy complex128 direct
+SVD, explicitly zeroing discarded singular values before U/S/Vh reconstruction.
+Each GPU SVD mixture output uses the existing native full reconstruction, while
+Gram uses the existing optimized filter. Every basis is estimated from the
+**mixture**, never from isolated components. Fixed-basis component probes use the
+same optimized application for all variants, with a CPU retained-projector
+reference. Probes are not an additive attribution of native SVD reconstruction
+roundoff or of mixture input rounding.
+
+Metrics include filtered-IQ/PD relative L2 errors, blood-probe distortion, and
+numerical tissue-probe error normalized by **input blood IQ norm**, not by strong
+tissue or mixture norm. Tissue basis/projector error is separated from application
+arithmetic using the candidate's actual retained/complement projector evaluated
+in complex128. Reference blood/noise retention shows signal loss due to changing
+rank bounds separately from numerical error. PD always divides by original T.
+Measured gaps, leading-subspace condition, component fractions, spectra, seeds,
+input-mixing rounding and Gram/clipping diagnostics are recorded per case.
+
+Default source arrays are complex128 to isolate working-precision effects;
+`--input-dtype complex64` tests stored acquisition precision. The reference uses
+the same stored mixture, promoted to complex128. Mixture rounding relative to the
+sum of stored components is separately normalized by blood strength. Optional
+JSON records GPU/CUDA/NumPy/CuPy versions, cuBLAS math mode, CuPy compute selection
+and TF32 environment flags; it is strict JSON, with null relative errors for a
+zero reference norm. No epsilon denominator, fallback, auto-acceptance threshold,
+automatic rank selection or timing claim is introduced. Backend/memory/basis
+failures are explicit records, not implicit precision changes. Compact tables
+report maxima across cases/seeds, not averages; maxima need not share a case.
+
+The small default run (`/tmp/clutter-accuracy-small.json`) exercised 144 case/band
+records, each with four variants. For controlled high-pass cases, worst-across-
+seed EVD64 relative IQ error at amplitude ratio 10 was ~1.3e-5 for a boundary sigma
+ratio 2, but ~0.575 for ratio 1.000001. Thus even moderate total tissue/blood ratio
+does not guarantee accuracy at an ambiguous boundary. At tissue/blood ratio 1000
+and boundary ratio 2, worst IQ error was ~0.028. These are deliberately stressed
+spectra, not a contradiction of the accurate rank-3 full-scene result. Extreme
+cases also lose accuracy in EVD128. Native versus CPU SVD128 disagreement reaches
+~1.6e-5 near fragile cutoffs, so the reference itself must not be treated as exact
+arbitrary-precision truth. Complex64 source rounding can introduce further limits.
+
+The controlled orthogonal fixture trivially retains all five blood factors with
+K=5; that is not evidence for component-space OPW quality in acquired data. The
+overlap fixture's high-pass reference itself retained ~39–92% of input blood
+across this small sweep, illustrating that rank choice can reject blood even
+with accurate arithmetic. Small matrices do not certify million-row covariance
+accumulation; a separate regression crosses the 16384-row chunk boundary.
+
+Proof: all **16 new tests pass**, including source dtypes, known spectrum/gap,
+paired/reproducible strengths, nonorthogonality, mixture-only basis estimation,
+component normalization, upper-cutoff retention, numerical/memory/basis failure
+records, multi-chunk processing and compact/strict-JSON output. Focused Ruff/ty
+checks pass. Full-suite validation had **271 passes and one unrelated failure**:
+an independently added `examples/benchmark_confusius_svd_precision.py` violates
+the existing exactly-three-top-level-example-scripts test; that file/rule were
+left untouched. All **16 new tests also pass CUDA memcheck with zero errors**
+with TF32 overrides disabled.
+
+Operator checkpoint command (completed for both source formats; results below):
+
+```bash
+for dtype in complex128 complex64; do
+  NVIDIA_TF32_OVERRIDE=0 CUPY_TF32=0 PYTHONPATH=examples uv run python -m _support.clutter_accuracy \\
+    --rows 512 --frames 200 --input-dtype "$dtype" --output "/tmp/clutter-accuracy-$dtype.json"
+done
+```
+
+Inspect per-case numerical tissue leakage, blood distortion, source rounding,
+actual spectral gaps and reference retention before treating EVD64 or a smaller K
+as acceptable. No clinical sensitivity or universal precision envelope is claimed.
+
+## Operator 200-frame accuracy-envelope result
+
+The operator ran the documented sweep with 512 rows, 200 frames and seeds 42–44
+for both complex128 and complex64 sources, with `CUPY_TF32=0` and
+`NVIDIA_TF32_OVERRIDE=0`. Each report contains 144 case/band records, each with
+four variants. Sources: terminal results and the per-case JSON inspected at
+`/tmp/clutter-accuracy-complex128.json` and
+`/tmp/clutter-accuracy-complex64.json`. These are local artifacts, not bundled
+fixtures. No backend failures were reported; finite outputs are not an accuracy
+acceptance criterion. Table values are dimensionless unless explicitly percent.
+
+The headline maxima combine vastly different strengths/gaps and need not occur
+in the same case. A more informative breakdown is the high-pass `[3,200)` result:
+
+| Complex64 source, overlap fixture | Worst EVD64 relative IQ error | Worst numerical tissue error / input blood norm |
+|---|---:|---:|
+| Tissue/blood amplitude 10 | 1.31e-5 (0.00131%) | 1.21e-5 |
+| 1e3 | 5.85e-4 (0.0585%) | 5.72e-4 |
+| 1e5 | 7.46e-2 (7.46%) | 7.33e-2 |
+| 1e7 | 4.67 (467%) | 4.85 |
+
+Blood-probe error remains tiny for dominant-only removal in this overlap model;
+large mixture errors at extreme ratios come primarily from residual numerical
+tissue, not destruction of the isolated blood probe. For the worst complex64-
+source high-pass EVD64 overlap case, tissue basis/projector error is ~4.45 times
+input blood norm and application error ~1.97; these are separate vector-error
+norms and must not be added as scalar attribution. Complex128-source high-pass
+overlap worst IQ error reaches ~7.16 at ratio 1e7. Even an apparently large
+cutoff gap does not eliminate the absolute-error/cancellation budget imposed by
+strong tissue and finite-precision projector application.
+
+In the controlled-spectrum fixture, the boundary matters independently of total
+amplitude ratio. For complex64 sources, EVD64 high-pass worst relative IQ errors:
+
+| Tissue/blood amplitude | Boundary sigma ratio 2 | 1.01 | 1.000001 |
+|---|---:|---:|---:|
+| 10 | 3.35e-5 | 1.51e-5 | 0.126 |
+| 1e3 | 0.0194 | 0.344 | 0.360 |
+| 1e5 | 1.17 | 0.598 | 0.593 |
+| 1e7 | 2.57 | 2.31 | 1.90 |
+
+The generator increases the leading tissue mode while boundary modes remain
+near blood; total amplitude ratio is not a universal tissue-subspace condition
+number. The close-boundary cases are deliberately fragile. EVD128 can fail there
+too, whereas native SVD128 agrees much more closely with NumPy: worst IQ error
+~4.2e-5 for complex128 sources and ~6.1e-8 for complex64 sources across the sweep.
+Improved backend agreement on rounded input is not evidence that rounding
+preserves the original signal: it changes the matrix and its near-degenerate
+subspaces. At ratio 1e7, complex64 input-mixing roundoff is ~0.25 times input blood
+norm, and even reference blood retention in the controlled fixture falls from
+~100% for complex128 input to as low as ~81.6–81.8% after complex64 input rounding.
+Promoting that stored matrix later cannot recover information lost on input.
+
+**High-pass success does not approve upper-cutoff filtering.** For complex64
+sources in the overlap fixture at amplitude ratio 1e3, EVD64 high-pass blood-probe
+error is only ~2.90e-7 of input blood norm, but the K=5 band gives ~0.330 (33%)
+blood-probe error and ~0.339 relative mixture IQ error. K=97 also gives large
+errors. Estimating the weak retained subspace is a different accuracy requirement
+from estimating only the three dominant modes. An arbitrary cutoff inside the
+noise spectrum may be less stable than a smaller band with a clearer boundary;
+errors need not improve monotonically with K.
+
+The SVD128 reference makes compression look promising **for these factor models**:
+K=5 retains at least ~99.990% (complex128 sources) or ~99.854% (complex64 sources)
+of the blood energy that survived high-pass removal in matched overlap cases.
+Its absolute blood retention is ~94.35–97.17%, with only ~2.4–2.5% noise left.
+That reference retention does not mean EVD64 can estimate the same small band
+accurately, and the fixture's imposed blood rank five is not acquired-data evidence.
+
+Decision: keep EVD64 as a qualified working candidate for the original full-size
+rank-3 high-pass scene, not an unconditional production default. The numerical
+harness/envelope step is complete enough to pursue structural reconstruction work.
+The immediate queue now prioritizes matched channel-filtered two-stage validation
+before more conventional OPW profiling/micro-optimization. Before any component-space
+OPW implementation is promoted, run retained-rank/reference-quality checks on
+the actual RCA clutter scene or representative acquired IQ, compare EVD64 and
+SVD64 basis accuracy for those bands, and include basis/projection cost. Do not
+infer 200/5 end-to-end speedup or a clinically useful K=5 from this sweep.
+
+Only result interpretation/roadmap changes follow this operator run; no filtering
+algorithm, precision/rank default or new GPU timing experiment was changed.
+
+## Matched two-stage clutter-validation harness
+
+Implemented `examples/_support/two_stage_clutter.py`, reusing the existing
+`TwoStageOpwWorkspace` densities and the complete-cost channel pipeline. No kernel,
+production default, common-phase benchmark or viewer is changed. Image-domain
+filtering and temporal-component reconstruction remain outside this experiment.
+
+- One EVD64 basis is estimated from the RC/CR mixture. Quality reconstruction uses
+  the same filtered GPU arrays for every density, separately probing blood,
+  tissue, noise and the mixture. No component-estimated bases are substituted.
+- Full-volume IQ difference energies use chunked complex128 differences and
+  float64 residual-power reduction, without full IQ D2H or energy subtraction.
+  Blood IQ/PD errors and power ratios are relative to conventional filtered
+  blood; tissue reconstruction error is normalized by that blood IQ norm.
+  These are reconstruction-approximation errors, not an independent SVD128 filter
+  error measurement or tissue rejection/absolute blood-retention assessment.
+- Conventional filtered IQ has an independent sampled NumPy DAS check. JSON adds
+  local multi-target blood sqrt-PD axis widths/profiles/peak shifts; these are not
+  isolated PSFs or acquired-flow evidence. Zero-reference ratios and unresolved/
+  clipped widths are explicit nulls.
+- Timed rows freshly estimate/apply the channel filter, allocate/layout, upload raw
+  inputs, reconstruct all T frames and download PD. Trials are warmed and
+  randomized/interleaved. Projector and PD checks prevent quietly comparing a
+  different filter or path to the fixed-input quality run. Diagnostic transfers,
+  component probes and JIT warm-up are outside timing; original-T normalization
+  is preserved. Detailed stages, memory, telemetry and checks remain in optional
+  strict JSON, not terminal arrays.
+- Candidate memory limits are explicit skips and numerical timed failures are
+  labeled. Failure to establish the shared basis/reference aborts comparison.
+  No density/chunk/precision fallback or approximation acceptance threshold is used.
+
+Validation: 22 new tests cover identical/unmodified filtered inputs, independent
+NumPy two-stage IQ/PD, original-T power, chunk boundaries, zero bands, projector
+phase invariance versus subspace changes, JSON/compact output and explicit failures
+(including releasing candidate IQ after an out-of-memory metric check). Full suite:
+293 passed; the existing exactly-three-top-level-example-scripts policy test fails
+because of independent `benchmark_confusius_svd_*` files, left untouched. The 35
+new/existing two-stage GPU tests pass CUDA memcheck with zero errors; focused
+Ruff/ty checks pass.
+
+Small integration cases exercise the harness only, not the 400 ms decision. The
+3×157×3, four-element/two-angle/seven-frame smoke has ~49% blood IQ error despite
+~95–99% blood power for densities 8/16, illustrating why power alone is not
+acceptance. These are not original-acquisition quality or throughput results.
+The operator checkpoint (200 frames, original acquisition/grid, three trials) is:
+
+```bash
+NVIDIA_TF32_OVERRIDE=0 CUPY_TF32=0 PYTHONPATH=examples uv run python -m _support.two_stage_clutter \
+  --rank-start 3 --output /tmp/two-stage-clutter.json
+```
+
+Interpret complex IQ and tissue-error/blood alongside PD and time; near-unity
+blood power alone can hide phase/spatial error. The two-stage approximation is
+not promoted, and its full-size clutter-filtered/acquired-data fidelity remains
+unresolved until the respective measurements and explicit acceptance decisions.
+
+## Consolidated benchmark entrypoint
+
+`examples/benchmark.py` dispatches the existing reconstruction, clutter and matched
+two-stage pipeline suites; `--suite all --rank-start 3` runs all three. Shared RCA
+workload dimensions/repeats are forwarded without changing default scenes, kernels,
+filter precision/rank policy or validation. Pipeline-only density/chunk options
+are not silently applied to reconstruction's density-8/chunk-32 reference.
+
+- No arguments retain the common-phase all-method reconstruction run and optional
+  automatic FPM reference. Reconstruction keeps paired best-of warmed timings;
+  clutter/pipeline retain randomized/interleaved medians. FPM retains its different
+  fixed acquisition/grid and paired-best summary, not an artificial speedup row.
+- `--output` writes one strict JSON report containing separate suite results.
+  Reconstruction now returns its paired best timings, RCA trials/upload timing
+  and telemetry in addition to its unchanged compact table. No raw volumes are
+  serialized and suite entrypoints do not write separate files during dispatch.
+- `--extended-clutter` explicitly adds the existing adversarial precision sweep
+  for both source dtypes, using its separate 256-row/32-frame/three-seed defaults.
+  It is not silently run with every throughput measurement.
+- CLI validation/help precede optional GPU imports and any trials, including all
+  suite bounds, to avoid running a costly first suite before rejecting later
+  options. Existing internal research-module entrypoints remain compatible.
+- The 400 ms reconstruction-only and complete-pipeline targets are reported
+  separately for the original 200-frame/500 Hz workload. Real-data loading and
+  reconstruction/filter algorithm changes are outside this consolidation.
+
+Validation: routing/default compatibility, pre-GPU argument/help validation,
+shared settings, opt-in precision routing and strict aggregate JSON are tested.
+A small native CUDA CLI run exercises all three suites; both native reconstruction
+and all-suite smoke tests pass CUDA memcheck with zero errors. Full suite: 323
+passed; the unchanged top-level-script policy still fails on independent
+`benchmark_confusius_svd_*` files, left untouched. Focused Ruff/type checks pass
+(type checking ignores missing optional imports such as uninstalled mach).
+FPM is unavailable in the native smoke; mocked tests verify automatic selection
+and paired best-trial/repeat forwarding. No full-size speed/quality claim is made.
+
+Full-size operator run (with optional detailed aggregate report):
+
+```bash
+NVIDIA_TF32_OVERRIDE=0 CUPY_TF32=0 uv run examples/benchmark.py \
+  --suite all --rank-start 3 --output /tmp/rcabeam-benchmark.json
+```
 
 ## Retained implementation
 

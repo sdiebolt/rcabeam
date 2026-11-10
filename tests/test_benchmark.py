@@ -51,14 +51,17 @@ def test_all_methods_best_trial_pairing_and_skipped_fpm(benchmark, monkeypatch):
     results = []
     render = benchmark._render
 
-    def report(timings, error):
+    def report(timings, error, repeat):
         results.append(timings)
-        render(timings, error)
+        render(timings, error, repeat)
 
     monkeypatch.setattr(benchmark, "_render", report)
     output = io.StringIO()
     monkeypatch.setattr(benchmark, "console", Console(file=output, width=100, color_system=None))
-    benchmark.main()
+    summary = benchmark.main()
+    assert summary["best_trials"]["opw"] == {"total_ms": 10, "upload_ms": 2}
+    assert len(summary["trials"]["opw"]) == 3
+    assert summary["best_trials"]["matrix"]["skipped"]
     assert set(calls) == {"opw", "two_stage", "xdoppler", "rc_fmas", "st_sw", "dmas"}
     assert all(count == 4 for count in calls.values())  # One warm-up, three timed trials.
     for method in calls:
@@ -98,7 +101,8 @@ def test_two_stage_power_reduces_complex_iq_on_gpu(benchmark, monkeypatch):
 
 
 @pytest.mark.parametrize("installed", [False, True])
-def test_fpm_reference_is_automatic_and_keeps_paired_times(benchmark, monkeypatch, installed):
+@pytest.mark.parametrize("repeat", [1, 3])
+def test_fpm_reference_is_automatic_and_keeps_paired_times(benchmark, monkeypatch, installed, repeat):
     from _support import matrix_benchmark
 
     monkeypatch.setitem(sys.modules, "mach", SimpleNamespace() if installed else None)
@@ -112,11 +116,11 @@ def test_fpm_reference_is_automatic_and_keeps_paired_times(benchmark, monkeypatc
 
     monkeypatch.setattr(matrix_benchmark, "benchmark_matrix_ensemble", run)
     geom = SimpleNamespace(fs=20e6, f_demod=15e6, c=1540)
-    result = benchmark._matrix_reference((np.arange(3),) * 3, geom, 200, 368, "bus")
+    result = benchmark._matrix_reference((np.arange(3),) * 3, geom, 200, 368, "bus", repeat)
     if installed:
         assert result == benchmark.Timing(2000, 250)
         assert monitored == ["bus"]
-        assert calls[0]["repeat"] == 3
+        assert calls[0]["repeat"] == repeat
         assert calls[0]["side"] == 32 and calls[0]["frames"] == 200
     else:
         assert result is None

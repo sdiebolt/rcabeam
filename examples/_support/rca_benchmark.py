@@ -1,6 +1,6 @@
-"""Fixed-workload, all-method benchmark; research sweeps live in separate modules."""
+"""All-method reconstruction suite with the historical common-phase reference."""
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from random import Random
 from time import perf_counter
 
@@ -43,8 +43,8 @@ def _check_opw(raw, angles, grid, geom, power):
         np.testing.assert_allclose(power[point], abs(iq) ** 2, rtol=0.004, atol=0.004)
 
 
-def _matrix_reference(grid, geom, frames, nsamp, bus):
-    """Keep the existing streaming FPM timing boundary and paired best-of-three result."""
+def _matrix_reference(grid, geom, frames, nsamp, bus, repeat=REPEAT):
+    """Keep the existing streaming FPM timing boundary and paired best-trial result."""
     try:
         import mach  # noqa: F401
     except ModuleNotFoundError as error:
@@ -67,15 +67,15 @@ def _matrix_reference(grid, geom, frames, nsamp, bus):
             fs=geom.fs,
             f0=geom.f_demod,
             c=geom.c,
-            repeat=REPEAT,
+            repeat=repeat,
             bandwidth_hz=15e6,
         )
     _check_volume(volume, (94, len(grid[1]), 94))
     return Timing(elapsed * 1e3, upload * 1e3)
 
 
-def _render(timings, power_error):
-    table = Table(title=f"Beamformer benchmark · best of {REPEAT} warmed trials")
+def _render(timings, power_error, repeat=REPEAT):
+    table = Table(title=f"Beamformer benchmark · best of {repeat} warmed trials")
     table.add_column("Method", style="bold")
     table.add_column("Total ms", justify="right")
     table.add_column("H2D ms", justify="right")
@@ -111,26 +111,29 @@ def _render(timings, power_error):
     )
 
 
-def main():
-    """Run one acquisition and show every method without selection flags or JSON."""
+def main(*, grid=80, elements=80, angles=16, frames=200, repeat=REPEAT):
+    """Run every method; retain the historical paired best-of timing summary."""
+    if min(grid, elements, angles, repeat) < 1 or frames < 2:
+        raise ValueError("Positive dimensions/repeats and at least two frames required")
     import cupy as cp
 
     bus = cp.cuda.Device().pci_bus_id
     console.print(
-        "[bold]RCA:[/bold] 80+80 elements · 16+16 angles · 200 frames · 15 MHz\n"
-        "80x80x157 voxels (x/y/z) · 4-12 mm · 20 MS/s · 368 IQ samples\n"
+        f"[bold]RCA:[/bold] {elements}+{elements} elements · {angles}+{angles} angles · {frames} frames · 15 MHz\n"
+        f"{grid}x{grid}x157 voxels (x/y/z) · 4-12 mm · 20 MS/s · 368 IQ samples\n"
         "Two-stage: 8 samples/wavelength, 32-frame chunks. FPM: 32x32, 5 waves, 94x94x157."
     )
     with console.status("Simulating shared acquisition…"):
-        raw, angles, grid, geom = ensemble_scene(80, 80, 16, 200)
-    shape = tuple(len(axis) for axis in grid)
+        raw, steering, axes, geom = ensemble_scene(grid, elements, angles, frames)
+    shape = tuple(len(axis) for axis in axes)
     references = {}
     timings = {}
+    trials = {method: [] for method in METHODS}
 
     def run(method, metrics):
         if method == "two_stage":
-            return _two_stage_power(raw, angles, grid, geom, metrics)
-        return ensemble_pd_from_channels(raw[0], raw[1], angles, 2e-6, grid, geom, method=method, timings=metrics)
+            return _two_stage_power(raw, steering, axes, geom, metrics)
+        return ensemble_pd_from_channels(raw[0], raw[1], steering, 2e-6, axes, geom, method=method, timings=metrics)
 
     with console.status("Warming up…") as status:
         for method, name in METHODS.items():
@@ -139,29 +142,54 @@ def main():
                 references[method] = run(method, {})
             _check_volume(references[method], shape)
             cp.get_default_memory_pool().free_all_blocks()
-        _check_opw(raw, angles, grid, geom, references["opw"])
+        _check_opw(raw, steering, axes, geom, references["opw"])
         norm = np.linalg.norm(references["opw"].astype(np.float64))
         if norm == 0:
             raise ValueError("The OPW reference is empty")
         power_error = np.linalg.norm(references["two_stage"].astype(np.float64) - references["opw"]) / norm
         rng = Random(42)
-        for trial in range(REPEAT):
+        for trial in range(repeat):
             order = list(METHODS)
             rng.shuffle(order)
             for method in order:
-                status.update(f"Trial {trial + 1}/{REPEAT}: {METHODS[method]}")
+                status.update(f"Trial {trial + 1}/{repeat}: {METHODS[method]}")
                 metrics = {}
                 cp.cuda.Stream.null.synchronize()
-                with monitor_gpu(bus):
+                with monitor_gpu(bus) as telemetry:
                     start = perf_counter()
                     volume = run(method, metrics)
                     elapsed = perf_counter() - start
                 _check_volume(volume, shape)
                 np.testing.assert_allclose(volume, references[method], rtol=0.002, atol=0.002)
                 timing = Timing(elapsed * 1e3, metrics["raw_upload_seconds"] * 1e3)
+                trials[method].append(
+                    {
+                        **asdict(timing),
+                        "stages_seconds": metrics,
+                        "telemetry_clock_mhz_power_w_temperature_c_utilization_percent": telemetry,
+                    }
+                )
                 if method not in timings or timing.total_ms < timings[method].total_ms:
                     timings[method] = timing
                 cp.get_default_memory_pool().free_all_blocks()
         status.update("FPM reference…")
-        timings["matrix"] = _matrix_reference(grid, geom, raw[0].shape[-1], raw[0].shape[0], bus)
-    _render(timings, power_error)
+        timings["matrix"] = _matrix_reference(axes, geom, raw[0].shape[-1], raw[0].shape[0], bus, repeat)
+    cp.get_default_memory_pool().free_all_blocks()
+    _render(timings, power_error, repeat)
+    return {
+        "stage": "unfiltered_reconstruction",
+        "shape": list(shape),
+        "channel_shape": list(raw[0].shape),
+        "pci_bus_id": bus,
+        "repeat": repeat,
+        "timing_summary": "paired best-of warmed randomized trials",
+        "best_trials": {
+            name: asdict(timing) if timing else {"skipped": "Install the matrix extra"}
+            for name, timing in timings.items()
+        },
+        "trials": trials,
+        "two_stage_pd_relative_l2": float(power_error),
+        "two_stage_samples_per_wavelength": 8,
+        "two_stage_frame_chunk": 32,
+        "matrix_reference": "Different acquisition/grid: 32x32 elements, 5 waves, 94x94x157; paired best only",
+    }
