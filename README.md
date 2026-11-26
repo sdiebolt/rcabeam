@@ -497,6 +497,10 @@ Volumetric Imaging* (2023), beamforms dense per-emission reference planes and
 expands them using the plane-wave trajectory and not-a-knot cubic splines.
 It keeps the current linear channel interpolation and FP32/complex64 arithmetic;
 this is not an exact reproduction of the paper's cubic channel interpolation.
+Plane densities of 2 and 4 samples per wavelength are undersampling experiments.
+At broadside the round-trip carrier cycles every half wavelength. For a highest
+occupied baseband frequency B, resolving the modulated plane requires a density
+above 4(1 + B/f_demod). Planning warns using the conservative B = fs/2.
 Reference planes are centered in the lateral FoV and depth-padded for all angles.
 Frame chunks bound plane/spline scratch; final canonical IQ is retained.
 The conventional OPW APIs and defaults are unchanged.

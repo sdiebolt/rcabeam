@@ -6,6 +6,7 @@ approximation; acquired-data/clutter-filtered quality has not been validated.
 
 from __future__ import annotations
 
+import warnings
 from operator import index
 from pathlib import Path
 from threading import Lock
@@ -34,6 +35,16 @@ def _plan(shape, angles, t_start, grid, geom, samples_per_wavelength):
         raise ValueError("Geometry and sampling must be finite")
     if min(constants[:3]) <= 0 or samples_per_wavelength < 2 or (geom.fnumber is not None and fn <= 0):
         raise ValueError("Require positive c/fs/carrier/F-number and at least two axial samples per wavelength")
+    # At broadside, tau = 2z/c. The highest positive RF frequency
+    # represented by complex samples is fd + fs/2 (or less for narrower IQ).
+    nyquist_density = 4 * (1 + geom.fs / (2 * geom.f_demod))
+    if samples_per_wavelength <= nyquist_density:
+        warnings.warn(
+            f"Axial undersampling experiment: use more than {nyquist_density:g} plane samples/wavelength "
+            "to resolve the full sampled IQ band at broadside. The carrier alone requires more than four.",
+            UserWarning,
+            stacklevel=3,
+        )
     if np.any(axes[1] <= 0) or np.any(np.abs(angles) >= np.pi / 2):
         raise ValueError("Require positive depths and steering angles strictly within +/-pi/2")
     x, z, y = axes

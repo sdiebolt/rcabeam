@@ -154,3 +154,9 @@ def test_moving_target_phase():
     old = np.sum(expected[0, 10, 1, :-1] * expected[0, 10, 1, 1:].conj())
     new = np.sum(actual[0, 10, 1, :-1] * actual[0, 10, 1, 1:].conj())
     assert abs(np.angle(new * old.conj())) < 0.003
+
+
+@pytest.mark.parametrize("density", [2, 4])
+def test_undersampled_reference_planes_are_identified(density):
+    with pytest.warns(UserWarning, match="Axial undersampling"):
+        two_stage_opw_numpy(*_case(1), samples_per_wavelength=density)
