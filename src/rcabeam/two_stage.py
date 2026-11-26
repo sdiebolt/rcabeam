@@ -71,10 +71,10 @@ def _plan(shape, angles, t_start, grid, geom, samples_per_wavelength):
 
 
 def _aperture_bands(axes, elements, anchors, slopes, plane_z, fnumber):
-    """Yield output-depth slices with identical channel masks and their spline knots."""
+    """Yield matching output-depth and spline-knot slices for each aperture band."""
     x, z, y = axes
     if fnumber <= 0:
-        yield slice(0, len(z)), plane_z
+        yield slice(0, len(z)), slice(0, len(plane_z))
         return
     # All receive masks grow monotonically with aperture radius. Equal counts
     # over both configurations therefore imply the same mask at every lateral point.
@@ -91,7 +91,21 @@ def _aperture_bands(axes, elements, anchors, slopes, plane_z, fnumber):
         # Include two guard knots on each side for the spline endpoint solve.
         lo = max(0, np.searchsorted(plane_z, depths.min() + shifts.min()) - 3)
         hi = min(len(plane_z), np.searchsorted(plane_z, depths.max() + shifts.max(), side="right") + 3)
-        yield slice(first, end), plane_z[lo:hi]
+        yield slice(first, end), slice(lo, hi)
+
+
+def _unchanged_apertures(lateral, elements, band_depths, fnumber):
+    """Mark lateral lines whose active channels match the preceding depth band."""
+    same = np.zeros((len(band_depths), len(lateral)), dtype=np.uint8)
+    if len(band_depths) > 1:
+        # Radius thresholds produce nested masks, even for unsorted elements
+        # and nonmonotonic depth grids. Equal counts imply equal channel sets.
+        radii = band_depths / (2 * fnumber)
+        for line, coordinate in enumerate(lateral):
+            distances = np.sort(np.abs(coordinate - elements))
+            counts = np.searchsorted(distances, radii, side="right")
+            same[1:, line] = counts[1:] == counts[:-1]
+    return same
 
 
 def _spline_factors(n):
@@ -133,7 +147,8 @@ def two_stage_opw_numpy(rc, cr, angles, t_start, grid, geom, *, samples_per_wave
     snapshot = RCAGeometry(*elements, *constants[:3], fnumber=None if constants[3] < 0 else constants[3])
     result = np.zeros((len(x), len(z), len(y), shape[-1]), np.complex128)
     dz = np.float32(geom.c / geom.f_demod / samples_per_wavelength)
-    for band, knots in _aperture_bands(axes, elements, anchors, slopes, pz, constants[3]):
+    for band, knot_slice in _aperture_bands(axes, elements, anchors, slopes, pz, constants[3]):
+        knots = pz[knot_slice]
         for config, raw, elevation, anchor in (("RC", rc, y, anchors[1]), ("CR", cr, x, anchors[0])):
             plane_grid = (x, knots, np.array([anchor])) if config == "RC" else (np.array([anchor]), knots, y)
             values = []
@@ -196,9 +211,15 @@ class TwoStageOpwWorkspace:
         self._dz = np.float32(geom.c / geom.f_demod / samples_per_wavelength)
         self._plane_depths = pz.copy()
         self._bands = [
-            (band, len(knots), knots[0], axes[1][band.start])
+            (band, knots.stop - knots.start, knots.start, axes[1][band.start])
             for band, knots in _aperture_bands(axes, elements, self._anchors, slopes, pz, constants[3])
         ]
+        band_depths = np.array([depth for _, _, _, depth in self._bands], np.float32)
+        self._same_aperture = [
+            cp.asarray(_unchanged_apertures(axis, el, band_depths, constants[3]))
+            for axis, el in zip((axes[0], axes[2]), elements, strict=True)
+        ]
+        self._knots = cp.asarray(pz)
         lengths = {length for _, length, _, _ in self._bands}
         na = self._shape[2]
         self._planes = [cp.empty((len(v), max(lengths), na, self._chunk), cp.complex64) for v in (axes[0], axes[2])]
@@ -247,7 +268,12 @@ class TwoStageOpwWorkspace:
 
             for first in range(0, nt, chunk):
                 count = min(chunk, nt - first)
-                for band, npz, plane_z0, aperture_depth in self._bands:
+                # After expansion the previous derivatives are free. Swap buffers
+                # to read the previous plane while building the next one.
+                planes, second = self._planes, self._second
+                previous_first = previous_count = 0
+                for band_id, (band, npz, knot_first, aperture_depth) in enumerate(self._bands):
+                    planes, second = second, planes
                     for config, raw in enumerate((rc, cr)):
                         lateral = self._axes[0 if config == 0 else 2]
                         nl = len(lateral)
@@ -261,10 +287,12 @@ class TwoStageOpwWorkspace:
                                 self._elements[config],
                                 self._angles,
                                 self._starts,
-                                self._planes[config],
+                                planes[config],
+                                second[config],
+                                self._same_aperture[config],
+                                self._knots,
+                                *ints(band_id, knot_first, previous_first, previous_count),
                                 *ints(ns, nc, na, nt, nl, npz, chunk, first, count),
-                                plane_z0,
-                                self._dz,
                                 anchor,
                                 *self._constants,
                                 aperture_depth,
@@ -274,8 +302,8 @@ class TwoStageOpwWorkspace:
                             ((nl * na * chunk + 127) // 128,),
                             (128,),
                             (
-                                self._planes[config],
-                                self._second[config],
+                                planes[config],
+                                second[config],
                                 *self._factors[npz],
                                 *ints(nl, npz, na, chunk, count),
                             ),
@@ -284,16 +312,17 @@ class TwoStageOpwWorkspace:
                         ((nx * (band.stop - band.start) * ny * chunk + 127) // 128,),
                         (128,),
                         (
-                            *self._planes,
-                            *self._second,
+                            *planes,
+                            *second,
                             *self._axes,
                             self._slopes,
                             self._iq,
                             *ints(nx, nz, ny, npz, na, nt, chunk, first, count, band.start, band.stop - band.start),
-                            plane_z0,
+                            self._plane_depths[knot_first],
                             self._dz,
                             *[np.float32(v) for v in self._anchors],
                         ),
                     )
+                    previous_first, previous_count = knot_first, npz
             cp.cuda.Stream.null.synchronize()
             return self._iq

@@ -11,8 +11,10 @@ __device__ float2 scale(float2 a, float b) {
 extern "C" __global__ void planes(
     const float2 *raw, const float *lateral, const float *elements,
     const float *angles, const float *starts, float2 *out,
+    const float2 *previous, const unsigned char *same_aperture, const float *knots,
+    int band_id, int knot_first, int previous_first, int previous_count,
     int ns, int nc, int na, int nt, int nl, int nz, int chunk,
-    int first, int count, float z0, float dz, float anchor,
+    int first, int count, float anchor,
     float c, float fs, float fd, float fn, float aperture_depth) {
   size_t point = (size_t)blockIdx.x * 4 + threadIdx.x / 32;
   if (point >= (size_t)nl * nz * na) return;
@@ -21,7 +23,16 @@ extern "C" __global__ void planes(
   int angle = point % na;
   int iz = (point / na) % nz;
   int il = point / na / nz;
-  float z = z0 + dz * iz;
+  int knot = knot_first + iz;
+  int prev_z = knot - previous_first;
+  if (prev_z >= 0 && prev_z < previous_count && same_aperture[(size_t)band_id * nl + il]) {
+    if (frame < count) {
+      size_t src = (((size_t)il * previous_count + prev_z) * na + angle) * chunk + frame;
+      out[point * chunk + frame] = previous[src];
+    }
+    return;
+  }
+  float z = knots[knot];
   float sn, cs;
   sincosf(angles[angle], &sn, &cs);
   float tx = (z * cs + anchor * sn) / c;

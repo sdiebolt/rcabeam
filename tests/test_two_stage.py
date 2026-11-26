@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from rcabeam import RCAGeometry, delay_rca_channels, simulate_point
-from rcabeam.two_stage import TwoStageOpwWorkspace, _second_derivatives, two_stage_opw_numpy
+from rcabeam.two_stage import TwoStageOpwWorkspace, _second_derivatives, _unchanged_apertures, two_stage_opw_numpy
 
 
 def _case(frames=3):
@@ -97,6 +97,33 @@ def test_gpu_input_guards():
         workspace.reconstruct(rc[..., ::-1], cr)
     with cp.cuda.Stream(non_blocking=True), pytest.raises(ValueError, match="default CUDA stream"):
         workspace.reconstruct(rc, cr)
+
+
+def test_unchanged_apertures_match_channel_sets():
+    lateral = np.array([0, -2, 1], np.float32)
+    elements = np.array([2, 0, -1, 2], np.float32)
+    depths = np.array([1, 2, 4, 2, 1], np.float32)
+    active = abs(lateral[:, None] - elements) <= depths[:, None, None] / 2
+    flags = _unchanged_apertures(lateral, elements, depths, np.float32(1))
+    assert not flags[0].any()
+    np.testing.assert_array_equal(flags[1:], (active[1:] == active[:-1]).all(axis=-1))
+
+
+def test_gpu_overlapping_aperture_bands():
+    """Growing and shrinking apertures share knots across bands of different lengths."""
+    cp = pytest.importorskip("cupy")
+    elements = np.array([-0.00205, 0, 0.0018])
+    geom = RCAGeometry(elements, elements[::-1], fs=20e6, f_demod=15e6, fnumber=1)
+    angles = np.array([-0.08, 0, 0.13])
+    grid = (np.array([0, 0.0003]), np.array([0.004, 0.0042, 0.0045, 0.004]), np.array([-0.002, 0, 0.002]))
+    rng = np.random.default_rng(5)
+    shape = (160, 3, 3, 5)
+    rc, cr = [(rng.normal(size=shape) + 1j * rng.normal(size=shape)).astype(np.complex64) for _ in range(2)]
+    workspace = TwoStageOpwWorkspace(shape, angles, 0, grid, geom, frame_chunk=3)
+    for row, col in ((rc, cr), (cr, rc)):
+        expected = two_stage_opw_numpy(row, col, angles, 0, grid, geom)
+        actual = cp.asnumpy(workspace.reconstruct(cp.asarray(row), cp.asarray(col)))
+        np.testing.assert_allclose(actual, expected, rtol=0.002, atol=0.002)
 
 
 @pytest.mark.parametrize("density,chunk", [(0, 32), (np.nan, 32), (8, 0)])
