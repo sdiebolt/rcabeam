@@ -600,3 +600,10 @@ signals and the same orthonormal basis. It times retained-coordinate correlation
 time-domain residuals after removing discarded modes, and explicit reconstruction
 from retained modes. Trials are interleaved and compared with complex128
 cross-power. Basis estimation, beamforming, and transfers are outside the timing.
+
+Run `PYTHONPATH=src:examples python -m _support.clutter_window_benchmark` for a
+paired moving-scatterer experiment with and without a strong reflector outside
+the imaged depths. The optional window limits only the samples used to estimate
+the shared basis. Sample bounds include the per-angle acquisition start, steering,
+receive aperture, and a three-cycle pulse margin. The report gives retained
+tissue and blood power at each component's in-volume target at matched cutoffs.
