@@ -593,3 +593,10 @@ All candidates use the target-depth receive aperture. The report contains warm
 reconstruction times, complex IQ and power errors against conventional DAS, and
 amplitude errors at all five targets. NumPy timings include geometry planning.
 CUDA timings reuse each workspace and exclude setup, JIT and transfers.
+
+For filtered XDoppler, run `PYTHONPATH=src:examples python -m _support.filtered_xdoppler_benchmark`
+or add `--backend cuda`. Each trial starts with resident, separately compounded RC/CR
+signals and the same orthonormal basis. It times retained-coordinate correlation,
+time-domain residuals after removing discarded modes, and explicit reconstruction
+from retained modes. Trials are interleaved and compared with complex128
+cross-power. Basis estimation, beamforming, and transfers are outside the timing.
