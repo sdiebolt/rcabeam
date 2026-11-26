@@ -114,3 +114,13 @@ def test_opw_cooperative_tails(frames: int, channels: int) -> None:
         rtol=5e-4,
         atol=5e-4,
     )
+
+
+@pytest.mark.parametrize("scale", [1e-12, 1e12])
+def test_dmas_response_scales_linearly(scale):
+    zero = np.zeros(1)
+    geom = RCAGeometry(zero, zero, c=2, fs=1, f_demod=0, fnumber=None)
+    raw = np.full((3, 1, 1, 1), scale, np.complex64)
+    result = ensemble_pd_from_channels(raw, raw, zero, 0, (zero, np.ones(1), zero), geom, method="dmas")
+    # Two coherent channels produce DMAS=2*scale, CCF=1/2 and ACF=1.
+    np.testing.assert_allclose(result, scale, atol=0, rtol=2e-6)

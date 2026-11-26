@@ -215,8 +215,8 @@ __global__ void dmas_batched(const float2 *rc, const float2 *cr,
   float inv = 1.0f / na;
   float nr = norm2(r) * inv * inv, nq = norm2(q) * inv * inv;
   float v = fmaxf(er * inv - nr, 0) + fmaxf(eq * inv - nq, 0);
-  float num = sqrtf(nr * nq), den = nr + nq + v / 2 - num;
-  float power = den > 0 ? dm * wc * num / den : 0;
+  float num = sqrtf(nr) * sqrtf(nq), den = nr + nq + v / 2 - num;
+  float power = den > 0 ? dm * wc * (num / den) : 0;
   if (!isfinite(power))
     power = 0;
   if (frame < nt && signal)
