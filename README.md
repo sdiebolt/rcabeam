@@ -1,5 +1,7 @@
 # rcabeam
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24571234.svg)](https://doi.org/10.5281/zenodo.24571234)
+
 Experimental row-column-array ultrasound beamforming in CUDA, with Python bindings and NumPy references. The library reconstructs OPW, XDoppler, RC-FMAS, St-SW and DMAS-CCF-ACF from demodulated IQ. Validation uses synthetic acquisitions. Performance and weak-flow sensitivity on acquired data remain open questions.
 
 ## Install
