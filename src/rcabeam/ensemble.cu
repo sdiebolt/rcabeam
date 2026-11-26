@@ -540,6 +540,57 @@ __global__ void stsw_tiled(const float2 *rc, const float2 *cr, const float4 *rx,
   }
 }
 
+__device__ float warp_sum(float x) {
+  for (int offset = FRAME_LANES / 2; offset; offset /= 2)
+    x += __shfl_down_sync(0xffffffff, x, offset);
+  return x;  // Sum in lane zero.
+}
+
+// For normalized series c[i,j], pair c[i,j] with all earlier rows except
+// their column j. This visits each allowed pair once with the original conjugation.
+template <int K>
+__global__ void finish_stsw(float *pd, float *weights, const float2 *ccf,
+                            size_t nv, size_t nt) {
+  size_t voxel = blockIdx.x * (blockDim.x / FRAME_LANES) + threadIdx.x / FRAME_LANES;
+  if (voxel >= nv)
+    return;
+  int lane = threadIdx.x % FRAME_LANES;
+  ccf += voxel * K * K * nt;
+  float inv_norm[K * K];
+#pragma unroll
+  for (int series = 0; series < K * K; ++series) {
+    float energy = 0;
+    for (size_t t = lane; t < nt; t += FRAME_LANES)
+      energy += norm2(ccf[series * nt + t]);
+    energy = __shfl_sync(0xffffffff, warp_sum(energy), 0);
+    inv_norm[series] = energy > 0 ? rsqrtf(energy) : 0;
+  }
+  float2 acc = make_float2(0, 0);
+  for (size_t t = lane; t < nt; t += FRAME_LANES) {
+    float2 total = make_float2(0, 0), column[K] = {};
+#pragma unroll
+    for (int i = 0; i < K; ++i) {
+      float2 row = make_float2(0, 0);
+#pragma unroll
+      for (int j = 0; j < K; ++j) {
+        int series = i * K + j;
+        float2 raw = ccf[series * nt + t];
+        float2 value = make_float2(raw.x * inv_norm[series], raw.y * inv_norm[series]);
+        float2 previous = make_float2(total.x - column[j].x, total.y - column[j].y);
+        acc = add(acc, mul(previous, make_float2(value.x, -value.y)));
+        column[j] = add(column[j], value);
+        row = add(row, value);
+      }
+      total = add(total, row);
+    }
+  }
+  float real = warp_sum(acc.x), imag = warp_sum(acc.y);
+  if (lane == 0) {
+    pd[2 * voxel] = hypotf(pd[2 * voxel], pd[2 * voxel + 1]);
+    weights[voxel] = hypotf(real, imag);
+  }
+}
+
 __global__ void finish(float *pd, float *weights, const float2 *ccf, size_t nv,
                        size_t nt, int method, int k) {
   size_t voxel = blockIdx.x * blockDim.x + threadIdx.x;
@@ -714,7 +765,15 @@ static rcabeam_status ensemble_impl(
 #undef TILED
   if (cudaGetLastError() != cudaSuccess)
     return RCABEAM_ERROR_CUDA;
-  if (method == 1 || method == 4) {
+  if (method == 4 && k > 2) {
+    const float2 *ccf = static_cast<const float2 *>(workspace);
+    if (k == 3)
+      finish_stsw<3><<<grid.x, 128>>>(pd, weights, ccf, nv, nt);
+    else
+      finish_stsw<4><<<grid.x, 128>>>(pd, weights, ccf, nv, nt);
+    if (cudaGetLastError() != cudaSuccess)
+      return RCABEAM_ERROR_CUDA;
+  } else if (method == 1 || method == 4) {
     finish<<<(nv + 127) / 128, 128>>>(
         pd, weights, static_cast<const float2 *>(workspace), nv, nt, method, k);
     if (cudaGetLastError() != cudaSuccess)

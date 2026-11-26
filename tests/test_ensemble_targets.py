@@ -43,7 +43,8 @@ def test_target_dmas(frequency: float, angle_count: int) -> None:
     )
 
 
-def test_stsw_tile_boundary() -> None:
+@pytest.mark.parametrize("k", [2, 3, 4])
+def test_stsw_tile_boundary(k) -> None:
     """Scratch tiling must not change St-SW full-volume normalization."""
     geom = RCAGeometry(x_el=np.array([-0.001, 0.001]), y_el=np.array([-0.001, 0.001]), fs=1e6, f_demod=0.1e6)
     grid = (np.zeros(1), np.array([0.007]), np.linspace(-0.001, 0.001, 4097))
@@ -51,6 +52,7 @@ def test_stsw_tile_boundary() -> None:
     rng = np.random.default_rng(42)
     r = (rng.normal(size=(16, 2, 4, 3)) + 1j * rng.normal(size=(16, 2, 4, 3))).astype(np.complex64)
     q = (rng.normal(size=r.shape) + 1j * rng.normal(size=r.shape)).astype(np.complex64)
+    r[:, :, 0] = 0  # Exercise zero-norm correlation series for k=4.
     ar, aq = [], []
     for t in range(3):
         _, a, _ = delay_rca_channel_data(r[..., t], angles, 1e-6, grid, geom, "RC", use_cuda=False)
@@ -58,8 +60,8 @@ def test_stsw_tile_boundary() -> None:
         ar.append(a)
         aq.append(b)
     iq = np.concatenate([np.stack(ar, axis=-1), np.stack(aq, axis=-1)], axis=-2)
-    expected = st_sw_pd(iq, np.arange(4), np.arange(4, 8), k=2)
-    actual = ensemble_pd_from_channels(r, q, angles, 1e-6, grid, geom, method="st_sw")
+    expected = st_sw_pd(iq, np.arange(4), np.arange(4, 8), k=k)
+    actual = ensemble_pd_from_channels(r, q, angles, 1e-6, grid, geom, method="st_sw", k=k)
     np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
 
 
