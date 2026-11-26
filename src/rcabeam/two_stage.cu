@@ -1,6 +1,15 @@
 // Experimental dual-stage OPW; raw and intermediate IQ remain complex64.
 #include <cuda_runtime.h>
 
+#ifndef NPLANES
+#define NPLANES 1
+#endif
+#if BASEBAND
+__device__ float2 multiply(float2 a, float2 b) {
+  return make_float2(a.x*b.x - a.y*b.y, a.x*b.y + a.y*b.x);
+}
+#endif
+
 __device__ float2 add(float2 a, float2 b) {
   return make_float2(a.x + b.x, a.y + b.y);
 }
@@ -14,20 +23,22 @@ extern "C" __global__ void planes(
     const float2 *previous, const unsigned char *same_aperture, const float *knots,
     int band_id, int knot_first, int previous_first, int previous_count,
     int ns, int nc, int na, int nt, int nl, int nz, int chunk,
-    int first, int count, float anchor,
+    int first, int count, const float *anchors,
     float c, float fs, float fd, float fn, float aperture_depth) {
   size_t point = (size_t)blockIdx.x * 4 + threadIdx.x / 32;
-  if (point >= (size_t)nl * nz * na) return;
+  if (point >= (size_t)NPLANES * nl * nz * na) return;
   int lane = threadIdx.x % 32;
   int frame = blockIdx.y * 32 + lane;
   int angle = point % na;
   int iz = (point / na) % nz;
-  int il = point / na / nz;
+  size_t line = point / na / nz;
+  int il = NPLANES == 1 ? (int)line : (int)(line % nl);
+  float anchor = anchors[NPLANES == 1 ? 0 : line / nl];
   int knot = knot_first + iz;
   int prev_z = knot - previous_first;
   if (prev_z >= 0 && prev_z < previous_count && same_aperture[(size_t)band_id * nl + il]) {
     if (frame < count) {
-      size_t src = (((size_t)il * previous_count + prev_z) * na + angle) * chunk + frame;
+      size_t src = ((line * previous_count + prev_z) * na + angle) * chunk + frame;
       out[point * chunk + frame] = previous[src];
     }
     return;
@@ -43,11 +54,18 @@ extern "C" __global__ void planes(
     if (lane == 0) {
       float d = lateral[il] - elements[ch];
       if (fn <= 0 || fabsf(d) <= aperture_depth / (2 * fn)) {
-        float tau = tx + sqrtf(z * z + d * d) / c;
+        float rx = sqrtf(z * z + d * d);
+        float tau = tx + rx / c;
         float sample = (tau - starts[angle]) * fs;
         index = sample >= 0 && sample <= ns - 1 ? (int)floorf(sample) : -1;
         w = sample - index;
-        sincosf(6.283185307179586f * fd * tau, &si, &co);
+        // Removing the closest-element carrier leaves (rx - z)/c.
+#if BASEBAND
+        float phase_time = (d * d) / ((rx + z) * c);
+#else
+        float phase_time = tau;
+#endif
+        sincosf(6.283185307179586f * fd * phase_time, &si, &co);
       }
     }
     index = __shfl_sync(0xffffffff, index, 0);
@@ -92,7 +110,7 @@ extern "C" __global__ void spline(
                                        scale(second[base + (nz - 3) * stride], -1));
 }
 
-__device__ float2 lookup(const float2 *p, const float2 *second, int lateral,
+__device__ float2 lookup(const float2 *p, const float2 *second, size_t lateral,
                          int angle, int frame, int na, int nz, int chunk, float position) {
   int i = (int)floorf(position);
   if (i < 0 || i >= nz - 1) return make_float2(0, 0);
@@ -106,9 +124,14 @@ __device__ float2 lookup(const float2 *p, const float2 *second, int lateral,
 
 extern "C" __global__ void expand(
     const float2 *rc, const float2 *cr, const float2 *rc_second, const float2 *cr_second,
-    const float *x, const float *z, const float *y, const float *slopes, float2 *out,
+    const float *z, const float *slopes, float2 *out,
     int nx, int nz, int ny, int npz, int na, int nt, int chunk, int first, int count,
-    int depth_start, int depth_count, float plane_z0, float plane_dz, float x0, float y0) {
+    int depth_start, int depth_count, float plane_z0, float plane_dz,
+    const int *x_plane, const float *x_offset, const int *y_plane, const float *y_offset
+#if BASEBAND
+    , const float2 *x_phase, const float2 *z_phase, const float2 *y_phase
+#endif
+    ) {
   size_t item = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
   size_t nv = (size_t)nx * depth_count * ny;
   if (item >= nv * chunk) return;
@@ -119,10 +142,18 @@ extern "C" __global__ void expand(
   float2 sum = make_float2(0, 0);
   for (int angle = 0; angle < na; ++angle) {
     // Our transmit delay uses +u*sin(theta), opposite the paper's angle sign.
-    float pr = (z[iz] + (y[iy] - y0) * slopes[angle] - plane_z0) / plane_dz;
-    float pq = (z[iz] + (x[ix] - x0) * slopes[angle] - plane_z0) / plane_dz;
-    sum = add(sum, lookup(rc, rc_second, ix, angle, frame, na, npz, chunk, pr));
-    sum = add(sum, lookup(cr, cr_second, iy, angle, frame, na, npz, chunk, pq));
+    float pr = (z[iz] + y_offset[iy] * slopes[angle] - plane_z0) / plane_dz;
+    float pq = (z[iz] + x_offset[ix] * slopes[angle] - plane_z0) / plane_dz;
+    size_t rline = ix + (NPLANES == 1 ? 0 : (size_t)y_plane[iy] * nx);
+    size_t cline = iy + (NPLANES == 1 ? 0 : (size_t)x_plane[ix] * ny);
+    float2 r = lookup(rc, rc_second, rline, angle, frame, na, npz, chunk, pr);
+    float2 q = lookup(cr, cr_second, cline, angle, frame, na, npz, chunk, pq);
+#if BASEBAND
+    float2 axial = z_phase[(size_t)iz * na + angle];
+    r = multiply(r, multiply(axial, y_phase[(size_t)iy * na + angle]));
+    q = multiply(q, multiply(axial, x_phase[(size_t)ix * na + angle]));
+#endif
+    sum = add(add(sum, r), q);
   }
   out[(((size_t)ix * nz + iz) * ny + iy) * nt + first + frame] = sum;
 }

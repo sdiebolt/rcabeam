@@ -17,8 +17,18 @@ import numpy as np
 from rcabeam.sim import RCAGeometry, _delay_numpy
 
 
-def _plan(shape, angles, t_start, grid, geom, samples_per_wavelength):
+def _plane_layout(axis, n_planes):
+    """Equal-width elevation slabs and the reference plane assigned to each output."""
+    lo, hi = float(axis.min()), float(axis.max())
+    centers = (lo + (np.arange(n_planes) + 0.5) * ((hi - lo) / n_planes)).astype(np.float32)
+    nearest = np.argmin(abs(axis[:, None] - centers), axis=1).astype(np.int32)
+    return centers, nearest, axis - centers[nearest]
+
+
+def _plan(shape, angles, t_start, grid, geom, samples_per_wavelength, n_planes, baseband):
     """Snapshot geometry and pad a uniform reference-depth axis for every mapping."""
+    if index(n_planes) < 1 or isinstance(n_planes, (bool, np.bool_)):
+        raise ValueError("Require at least one reference plane")
     if len(shape) != 4 or any(index(n) < 1 for n in shape) or shape[0] < 2:
         raise ValueError("Expected nonempty (samples, channels, angles, frames), samples >=2")
     shape = tuple(index(n) for n in shape)
@@ -34,12 +44,14 @@ def _plan(shape, angles, t_start, grid, geom, samples_per_wavelength):
     constants = np.asarray([geom.c, geom.fs, geom.f_demod, fn, samples_per_wavelength], dtype=np.float32)
     if not all(np.isfinite(v).all() for v in (*axes, angles, *elements, starts, constants)):
         raise ValueError("Geometry and sampling must be finite")
+    if n_planes * max(len(axes[0]), len(axes[2])) > np.iinfo(np.int32).max:
+        raise ValueError("Reference plane line count must fit signed int32")
     if min(constants[:3]) <= 0 or samples_per_wavelength < 2 or (geom.fnumber is not None and fn <= 0):
         raise ValueError("Require positive c/fs/carrier/F-number and at least two axial samples per wavelength")
     # At broadside, tau = 2z/c. The highest positive RF frequency
     # represented by complex samples is fd + fs/2 (or less for narrower IQ).
     nyquist_density = 4 * (1 + geom.fs / (2 * geom.f_demod))
-    if samples_per_wavelength <= nyquist_density:
+    if not baseband and samples_per_wavelength <= nyquist_density:
         warnings.warn(
             f"Axial undersampling experiment: use more than {nyquist_density:g} plane samples/wavelength "
             "to resolve the full sampled IQ band at broadside. The carrier alone requires more than four.",
@@ -49,11 +61,9 @@ def _plan(shape, angles, t_start, grid, geom, samples_per_wavelength):
     if np.any(axes[1] <= 0) or np.any(np.abs(angles) >= np.pi / 2):
         raise ValueError("Require positive depths and steering angles strictly within +/-pi/2")
     x, z, y = axes
-    anchors = ((float(x.min()) + float(x.max())) / 2, (float(y.min()) + float(y.max())) / 2)
+    layouts = [_plane_layout(axis, n_planes) for axis in (x, y)]
     slopes = np.tan(angles / 2)
-    shifts = np.concatenate(
-        [((axis - anchor)[:, None] * slopes).ravel() for axis, anchor in zip((x, y), anchors, strict=True)]
-    )
+    shifts = np.concatenate([(offset[:, None] * slopes).ravel() for _, _, offset in layouts])
     dz = np.float32(geom.c / geom.f_demod / samples_per_wavelength)
     if not np.isfinite(dz) or dz <= 0:
         raise ValueError("Reference-depth spacing is not representable in float32")
@@ -67,10 +77,10 @@ def _plan(shape, angles, t_start, grid, geom, samples_per_wavelength):
     if max(*shape, *(len(v) for v in axes), npz) > np.iinfo(np.int32).max:
         raise ValueError("Prototype dimensions must fit signed int32")
     plane_z = z0 + np.arange(npz, dtype=np.float32) * dz
-    return shape, angles, starts, axes, elements, anchors, slopes, plane_z, constants[:4]
+    return shape, angles, starts, axes, elements, layouts, slopes, plane_z, constants[:4]
 
 
-def _aperture_bands(axes, elements, anchors, slopes, plane_z, fnumber):
+def _aperture_bands(axes, elements, layouts, slopes, plane_z, fnumber):
     """Yield matching output-depth and spline-knot slices for each aperture band."""
     x, z, y = axes
     if fnumber <= 0:
@@ -83,9 +93,7 @@ def _aperture_bands(axes, elements, anchors, slopes, plane_z, fnumber):
     )
     counts = np.searchsorted(distances, z / (2 * fnumber), side="right")
     bounds = [0, *(np.flatnonzero(np.diff(counts)) + 1), len(z)]
-    shifts = np.concatenate(
-        [((axis[:, None] - anchor) * slopes).ravel() for axis, anchor in zip((x, y), anchors, strict=True)]
-    )
+    shifts = np.concatenate([(offset[:, None] * slopes).ravel() for _, _, offset in layouts])
     for first, end in pairwise(bounds):
         depths = z[first:end]
         # Include two guard knots on each side for the spline endpoint solve.
@@ -135,22 +143,23 @@ def _second_derivatives(planes):
     return result
 
 
-def two_stage_opw_numpy(rc, cr, angles, t_start, grid, geom, *, samples_per_wavelength=8):
+def two_stage_opw_numpy(rc, cr, angles, t_start, grid, geom, *, samples_per_wavelength=8, n_planes=1, baseband=False):
     """Reference complex IQ using existing NumPy DAS and not-a-knot splines."""
     rc, cr = np.asarray(rc), np.asarray(cr)
     if rc.shape != cr.shape or rc.dtype != np.complex64 or cr.dtype != np.complex64:
         raise ValueError("Inputs must be matching complex64 channel ensembles")
-    shape, angles, starts, axes, elements, anchors, slopes, pz, constants = _plan(
-        rc.shape, angles, t_start, grid, geom, samples_per_wavelength
+    shape, angles, starts, axes, elements, layouts, slopes, pz, constants = _plan(
+        rc.shape, angles, t_start, grid, geom, samples_per_wavelength, n_planes, baseband
     )
     x, z, y = axes
     snapshot = RCAGeometry(*elements, *constants[:3], fnumber=None if constants[3] < 0 else constants[3])
     result = np.zeros((len(x), len(z), len(y), shape[-1]), np.complex128)
     dz = np.float32(geom.c / geom.f_demod / samples_per_wavelength)
-    for band, knot_slice in _aperture_bands(axes, elements, anchors, slopes, pz, constants[3]):
+    for band, knot_slice in _aperture_bands(axes, elements, layouts, slopes, pz, constants[3]):
         knots = pz[knot_slice]
-        for config, raw, elevation, anchor in (("RC", rc, y, anchors[1]), ("CR", cr, x, anchors[0])):
-            plane_grid = (x, knots, np.array([anchor])) if config == "RC" else (np.array([anchor]), knots, y)
+        for config, raw, elevation, layout in (("RC", rc, y, layouts[1]), ("CR", cr, x, layouts[0])):
+            centers, nearest, offset = layout
+            plane_grid = (x, knots, centers) if config == "RC" else (centers, knots, y)
             values = []
             for frame in range(shape[-1]):
                 _, a, _ = _delay_numpy(
@@ -163,25 +172,38 @@ def two_stage_opw_numpy(rc, cr, angles, t_start, grid, geom, *, samples_per_wave
                     channels_out=False,
                     aperture_depth=z[band.start],
                 )
-                values.append(a[:, :, 0] if config == "RC" else a[0].transpose(1, 0, 2))
+                values.append(a if config == "RC" else a.transpose(2, 1, 0, 3))
             planes = np.stack(values, axis=-1).astype(np.complex128)
+            if baseband:
+                kz, ku = _reference_wavenumbers(angles, geom)
+                phase = knots[:, None, None] * kz + centers[None, :, None] * ku
+                planes *= np.exp(-1j * phase)[None, ..., None]
             second = _second_derivatives(planes)
             for angle, slope in enumerate(slopes):
-                position = (z[band, None] + (elevation[None, :] - anchor) * slope - knots[0]) / dz
+                position = (z[band, None] + offset[None, :] * slope - knots[0]) / dz
                 i = np.floor(position).astype(int)
                 w = position - i
                 a = 1 - w
                 value = (
-                    a[None, ..., None] * planes[:, i, angle]
-                    + w[None, ..., None] * planes[:, i + 1, angle]
+                    a[None, ..., None] * planes[:, i, nearest, angle]
+                    + w[None, ..., None] * planes[:, i + 1, nearest, angle]
                     + (
-                        (a**3 - a)[None, ..., None] * second[:, i, angle]
-                        + (w**3 - w)[None, ..., None] * second[:, i + 1, angle]
+                        (a**3 - a)[None, ..., None] * second[:, i, nearest, angle]
+                        + (w**3 - w)[None, ..., None] * second[:, i + 1, nearest, angle]
                     )
                     / 6
                 )
+                if baseband:
+                    phase = z[band, None] * kz[angle] + elevation * ku[angle]
+                    value *= np.exp(1j * phase)[None, ..., None]
                 result[:, band] += value if config == "RC" else value.transpose(2, 1, 0, 3)
     return result.astype(np.complex64)
+
+
+def _reference_wavenumbers(angles, geom):
+    k = 2 * np.pi * geom.f_demod / geom.c
+    theta = angles.astype(np.float64)
+    return k * (1 + np.cos(theta)), k * np.sin(theta)
 
 
 class TwoStageOpwWorkspace:
@@ -194,17 +216,38 @@ class TwoStageOpwWorkspace:
     or ordered on the default stream. No clutter filter or FP16 path.
     """
 
-    def __init__(self, channel_shape, angles, t_start, grid, geom, *, samples_per_wavelength=8, frame_chunk=32):
+    def __init__(
+        self,
+        channel_shape,
+        angles,
+        t_start,
+        grid,
+        geom,
+        *,
+        samples_per_wavelength=8,
+        frame_chunk=32,
+        n_planes=1,
+        baseband=False,
+    ):
         import cupy as cp
 
-        plan = _plan(channel_shape, angles, t_start, grid, geom, samples_per_wavelength)
-        self._shape, angles, starts, axes, elements, self._anchors, slopes, pz, constants = plan
+        plan = _plan(channel_shape, angles, t_start, grid, geom, samples_per_wavelength, n_planes, baseband)
+        self._shape, angles, starts, axes, elements, layouts, slopes, pz, constants = plan
         if index(frame_chunk) < 1:
             raise ValueError("Frame chunk must be positive")
         self._chunk = min(index(frame_chunk), self._shape[-1])
         self._device = cp.cuda.Device().id
         self._check_context()
         self._lock = Lock()
+        self._n_planes = n_planes
+        self._layouts = [tuple(cp.asarray(v) for v in layout) for layout in layouts]
+        self._phase = ()
+        if baseband:
+            kz, ku = _reference_wavenumbers(angles, geom)
+            self._phase = tuple(
+                cp.asarray(np.exp(1j * axis[:, None] * k).astype(np.complex64))
+                for axis, k in zip(axes, (ku, kz, ku), strict=True)
+            )
         self._angles, self._starts, self._slopes = [cp.asarray(v) for v in (angles, starts, slopes)]
         self._axes, self._elements = [cp.asarray(v) for v in axes], [cp.asarray(v) for v in elements]
         self._constants = tuple(np.float32(v) for v in constants)
@@ -212,7 +255,7 @@ class TwoStageOpwWorkspace:
         self._plane_depths = pz.copy()
         self._bands = [
             (band, knots.stop - knots.start, knots.start, axes[1][band.start])
-            for band, knots in _aperture_bands(axes, elements, self._anchors, slopes, pz, constants[3])
+            for band, knots in _aperture_bands(axes, elements, layouts, slopes, pz, constants[3])
         ]
         band_depths = np.array([depth for _, _, _, depth in self._bands], np.float32)
         self._same_aperture = [
@@ -222,11 +265,16 @@ class TwoStageOpwWorkspace:
         self._knots = cp.asarray(pz)
         lengths = {length for _, length, _, _ in self._bands}
         na = self._shape[2]
-        self._planes = [cp.empty((len(v), max(lengths), na, self._chunk), cp.complex64) for v in (axes[0], axes[2])]
+        self._planes = [
+            cp.empty((n_planes * len(v), max(lengths), na, self._chunk), cp.complex64) for v in (axes[0], axes[2])
+        ]
         self._second = [cp.empty_like(v) for v in self._planes]
         self._factors = {n: tuple(cp.asarray(v) for v in _spline_factors(n)) for n in lengths}
         self._iq = cp.empty((*[len(v) for v in axes], self._shape[-1]), cp.complex64)
-        module = cp.RawModule(code=Path(__file__).with_suffix(".cu").read_text(), options=("--std=c++17",))
+        module = cp.RawModule(
+            code=Path(__file__).with_suffix(".cu").read_text(),
+            options=("--std=c++17", f"-DNPLANES={n_planes}", f"-DBASEBAND={int(baseband)}"),
+        )
         self._plane_kernel, self._spline_kernel, self._expand_kernel = [
             module.get_function(v) for v in ("planes", "spline", "expand")
         ]
@@ -277,9 +325,9 @@ class TwoStageOpwWorkspace:
                     for config, raw in enumerate((rc, cr)):
                         lateral = self._axes[0 if config == 0 else 2]
                         nl = len(lateral)
-                        anchor = np.float32(self._anchors[1 - config])
+                        lines = nl * self._n_planes
                         self._plane_kernel(
-                            ((nl * npz * na + 3) // 4, (count + 31) // 32),
+                            ((lines * npz * na + 3) // 4, (count + 31) // 32),
                             (128,),
                             (
                                 raw,
@@ -293,19 +341,19 @@ class TwoStageOpwWorkspace:
                                 self._knots,
                                 *ints(band_id, knot_first, previous_first, previous_count),
                                 *ints(ns, nc, na, nt, nl, npz, chunk, first, count),
-                                anchor,
+                                self._layouts[1 - config][0],
                                 *self._constants,
                                 aperture_depth,
                             ),
                         )
                         self._spline_kernel(
-                            ((nl * na * chunk + 127) // 128,),
+                            ((lines * na * chunk + 127) // 128,),
                             (128,),
                             (
                                 planes[config],
                                 second[config],
                                 *self._factors[npz],
-                                *ints(nl, npz, na, chunk, count),
+                                *ints(lines, npz, na, chunk, count),
                             ),
                         )
                     self._expand_kernel(
@@ -314,13 +362,15 @@ class TwoStageOpwWorkspace:
                         (
                             *planes,
                             *second,
-                            *self._axes,
+                            self._axes[1],
                             self._slopes,
                             self._iq,
                             *ints(nx, nz, ny, npz, na, nt, chunk, first, count, band.start, band.stop - band.start),
                             self._plane_depths[knot_first],
                             self._dz,
-                            *[np.float32(v) for v in self._anchors],
+                            *self._layouts[0][1:],
+                            *self._layouts[1][1:],
+                            *self._phase,
                         ),
                     )
                     previous_first, previous_count = knot_first, npz

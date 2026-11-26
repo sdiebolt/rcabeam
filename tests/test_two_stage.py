@@ -204,3 +204,21 @@ def test_aperture_uses_target_depth(on_gpu):
         result = two_stage_opw_numpy(rc, cr, angles, 0, grid, geom)
     np.testing.assert_array_equal(result[:, [0, 2]], 0)
     np.testing.assert_allclose(abs(result[:, 1]), 1, atol=0.05)
+
+
+@pytest.mark.parametrize("on_gpu", [False, True])
+@pytest.mark.parametrize("n_planes", [1, 2])
+def test_baseband_preserves_aperture_at_output_depth(n_planes, on_gpu):
+    geom = RCAGeometry(np.array([0.00205]), np.zeros(1), fs=20e6, f_demod=15e6, fnumber=1)
+    angles = np.array([0.14])
+    grid = (np.zeros(1), np.array([0.004, 0.0042, 0.004]), np.array([-0.004, 0.004]))
+    rc = np.ones((256, 1, 1, 3), np.complex64)
+    cr = np.zeros_like(rc)
+    options = dict(samples_per_wavelength=4, baseband=True, n_planes=n_planes)
+    expected = two_stage_opw_numpy(rc, cr, angles, 0, grid, geom, **options)
+    np.testing.assert_array_equal(expected[:, [0, 2]], 0)
+    np.testing.assert_allclose(abs(expected[:, 1]), 1, atol=0.002)
+    if on_gpu:
+        cp = pytest.importorskip("cupy")
+        ws = TwoStageOpwWorkspace(rc.shape, angles, 0, grid, geom, frame_chunk=2, **options)
+        np.testing.assert_allclose(cp.asnumpy(ws.reconstruct(cp.asarray(rc), cp.asarray(cr))), expected, atol=0.002)

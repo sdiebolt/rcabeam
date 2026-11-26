@@ -582,3 +582,14 @@ needs further quality work, not just kernel tuning. Details: [ROADMAP.md](ROADMA
   adds about **1.61 GB**. Larger workloads may exceed VRAM.
 - [`include/rcabeam.h`](include/rcabeam.h) defines the C API, including packed
   device buffers and caller-owned scratch for integration without host roundtrips.
+
+### Baseband and reference-plane experiment
+
+Run `PYTHONPATH=src:examples python -m _support.baseband_benchmark` for a small
+NumPy comparison, or add `--backend cuda --full` for the resident 200-frame CUDA
+benchmark. It compares the existing single-plane reconstruction at eight axial
+samples per wavelength with one and two baseband planes at densities 2, 4 and 8.
+All candidates use the target-depth receive aperture. The report contains warm
+reconstruction times, complex IQ and power errors against conventional DAS, and
+amplitude errors at all five targets. NumPy timings include geometry planning.
+CUDA timings reuse each workspace and exclude setup, JIT and transfers.
