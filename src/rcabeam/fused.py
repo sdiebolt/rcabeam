@@ -6,7 +6,7 @@ import numpy as np
 
 from rcabeam.dmas import dmas_ccf_acf_core
 from rcabeam.fmas import rc_fmas_pd
-from rcabeam.opw import opw
+from rcabeam.opw import opw_numpy
 from rcabeam.power import power_doppler
 from rcabeam.sim import RCAGeometry, _scan_coords, delay_rca_channel_data, delay_rca_channels
 from rcabeam.xdoppler import xdoppler_pd
@@ -202,7 +202,7 @@ def opw_pd_from_channels(
 
     rc = delay_rca_channels(iq_rc, angles, t_start, grid, geom, "RC", use_cuda=False)
     cr = delay_rca_channels(iq_cr, angles, t_start, grid, geom, "CR", use_cuda=False)
-    return power_doppler(opw(np.concatenate([rc, cr], axis=-1)[..., None]))
+    return power_doppler(opw_numpy(np.concatenate([rc, cr], axis=-1)[..., None]))
 
 
 def rc_fmas_pd_from_channels(
