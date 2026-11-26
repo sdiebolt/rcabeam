@@ -243,7 +243,8 @@ def apply_temporal_filter(iq: IQ, basis: cp.ndarray, *, rank_start: int, rank_st
 def filtered_power(iq: cp.ndarray, basis: cp.ndarray, *, rank_start: int, rank_stop: int | None = None) -> cp.ndarray:
     """Image-domain filtered PD without allocating a full filtered IQ ensemble.
 
-    Chunked residuals avoid subtracting nearly equal total/projected energies.
+    Retained-coordinate norms give power directly for narrow bands. For wide
+    bands, chunked residuals avoid subtracting nearly equal total/projected energies.
     Real/imaginary squares and accumulation use float64 to avoid power overflow
     or cancellation in float32; projection arithmetic follows the basis dtype.
     Original T is the denominator. This is not reduced-component beamforming.
@@ -254,12 +255,17 @@ def filtered_power(iq: cp.ndarray, basis: cp.ndarray, *, rank_start: int, rank_s
     frames = arrays[0].shape[-1]
     start, stop = _rank_interval(frames, rank_start, rank_stop)
     vectors, subtract = _filter_vectors(basis, frames, start, stop)
+    if start == stop:
+        return cp.zeros(iq.shape[:-1], cp.float64)
     matrix = iq.reshape(-1, frames)
     power = cp.empty(len(matrix), cp.float64)
     for first in range(0, len(matrix), 16384):
         block = matrix[first : first + 16384].astype(basis.dtype)
-        residual = _filtered_block(block, vectors, subtract)
-        power[first : first + len(block)] = _mean_power(residual, axis=-1)
+        if subtract:
+            values = _filtered_block(block, vectors, True)
+        else:
+            values = block @ vectors
+        power[first : first + len(block)] = _mean_power(values, axis=-1) * (values.shape[1] / frames)
     if not bool(cp.isfinite(power).all()):
         raise np.linalg.LinAlgError("Nonfinite filtered power; rescale the input")
     return power.reshape(iq.shape[:-1])

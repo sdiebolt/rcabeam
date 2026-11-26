@@ -109,8 +109,11 @@ def test_smaller_projector_and_power_without_full_output(monkeypatch, start, sto
     expected = np.zeros_like(host)
     expected[:, start:stop] = host[:, start:stop]
     actual = apply_temporal_filter(iq, basis, rank_start=start, rank_stop=stop)
-    power = gpu_clutter.filtered_power(iq, basis, rank_start=start, rank_stop=stop)
     assert set(observed) == {modes}
+    observed.clear()
+    power = gpu_clutter.filtered_power(iq, basis, rank_start=start, rank_stop=stop)
+    if stop - start <= 100:
+        assert not observed  # Narrow bands never reconstruct T output samples.
     np.testing.assert_allclose(cp.asnumpy(actual), expected, atol=1e-13)
     np.testing.assert_allclose(cp.asnumpy(power), np.mean(np.abs(expected) ** 2, axis=-1), atol=1e-13)
     np.testing.assert_array_equal(cp.asnumpy(iq), host)
