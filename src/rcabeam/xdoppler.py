@@ -91,6 +91,8 @@ def xdoppler_pd(
     np.ndarray
         XDoppler PD volume with shape `(...)`.
     """
+    angle_numbers = np.arange(np.shape(iq)[-2])
+    rc_idx, cr_idx = angle_numbers[rc_idx], angle_numbers[cr_idx]
     rc_span = _contiguous_span(rc_idx)
     cr_span = _contiguous_span(cr_idx)
     if use_cuda and output == "abs" and rc_span is not None and cr_span is not None:

@@ -72,6 +72,8 @@ def rc_fmas_pd(iq: np.ndarray, rc_idx: np.ndarray, cr_idx: np.ndarray, *, use_cu
     np.ndarray
         Mean RC-FMAS power over slow time with shape `(...)`.
     """
+    angle_numbers = np.arange(np.shape(iq)[-2])
+    rc_idx, cr_idx = angle_numbers[rc_idx], angle_numbers[cr_idx]
     rc_span = _contiguous_span(rc_idx)
     cr_span = _contiguous_span(cr_idx)
     if use_cuda and rc_span is not None and cr_span is not None:

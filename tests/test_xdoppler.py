@@ -30,3 +30,12 @@ def test_xdoppler_matches_reference_formula() -> None:
     np.testing.assert_allclose(xdoppler_pd(iq, rc_idx, cr_idx, output="complex"), expected)
     np.testing.assert_allclose(xdoppler_pd(iq, rc_idx, cr_idx, output="abs"), np.abs(expected), rtol=1e-5)
     np.testing.assert_allclose(xdoppler_pd(iq, rc_idx, cr_idx, output="real"), expected.real)
+
+
+def test_boolean_and_negative_angle_selectors():
+    from rcabeam import rc_fmas_pd
+
+    iq = np.array([[2], [7]], np.complex64)
+    for method in (xdoppler_pd, rc_fmas_pd):
+        expected = method(iq, np.array([1]), np.array([0]), use_cuda=False)
+        np.testing.assert_allclose(method(iq, np.array([False, True]), np.array([-2])), expected)
