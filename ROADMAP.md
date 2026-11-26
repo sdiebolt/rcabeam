@@ -1606,3 +1606,26 @@ The research entry points are `_support.baseband_benchmark`,
 under `examples`. The focused GPU test run had 25 passes and one RC-FMAS
 selector assertion exceeding its CPU/GPU tolerance by roundoff. Both selector
 forms returned identical results on CUDA.
+
+### Default reconstruction suite
+
+With the same code and 200-frame RCA scene, the default reconstruction suite
+measured host-input-to-host-output times including allocation, raw upload,
+beamforming, reduction and final download. Each RCA row is the best of three
+warmed, randomly interleaved trials. Its upload time comes from that same trial.
+The two-stage row uses the default single plane at 8 samples/λ. Power differed
+from conventional OPW by 7.68% relative L2.
+
+| Method | Total ms | Raw upload ms |
+|---|---:|---:|
+| Conventional OPW | 424.2 | 58.6 |
+| Two-stage OPW | 404.4 | 59.4 |
+| XDoppler | 1167.9 | 59.4 |
+| RC-FMAS | 1842.0 | 63.0 |
+| St-SW (two subsets) | 1145.8 | 61.2 |
+| DMAS-CCF-ACF | 2076.6 | 60.4 |
+| mach FPM reference | 1261.2 | 123.5 |
+
+The fastest default RCA row missed 400 ms by 4.4 ms before clutter filtering.
+The FPM reference used a 32 × 32 matrix acquisition with five waves and a
+94 × 157 × 94 grid. All benchmark numerical checks passed. One-second monitoring detected no competing GPU activity.
