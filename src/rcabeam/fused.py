@@ -109,11 +109,16 @@ def fast_pd_from_channels(
             cuda_fast_pd_from_channels(*args[:7], *out, *args[7:])
             shape = (len(x), len(z), len(y))
             return out[0].reshape(shape), out[1].reshape(shape), out[2].reshape(shape)
-    return (
-        opw_pd_from_channels(iq_rc, iq_cr, angles, t_start, grid, geom, use_cuda=False),
-        xdoppler_pd_from_channels(iq_rc, iq_cr, angles, t_start, grid, geom, use_cuda=False),
-        rc_fmas_pd_from_channels(iq_rc, iq_cr, angles, t_start, grid, geom, use_cuda=False),
-    )
+    iq, ri, ci = _delayed_angles(iq_rc, iq_cr, angles, t_start, grid, geom)
+    return power_doppler(opw_numpy(iq)), xdoppler_pd(iq, ri, ci, use_cuda=False), rc_fmas_pd(iq, ri, ci, use_cuda=False)
+
+
+def _delayed_angles(iq_rc, iq_cr, angles, t_start, grid, geom):
+    """Beamform each aperture once and expose the singleton slow-time axis."""
+    rc = delay_rca_channels(iq_rc, angles, t_start, grid, geom, "RC", use_cuda=False)
+    cr = delay_rca_channels(iq_cr, angles, t_start, grid, geom, "CR", use_cuda=False)
+    ri = np.arange(len(angles))
+    return np.concatenate((rc, cr), axis=-1)[..., None], ri, ri + len(angles)
 
 
 def dmas_ccf_acf_from_channels(
@@ -200,9 +205,8 @@ def opw_pd_from_channels(
         if out is not None:
             return out
 
-    rc = delay_rca_channels(iq_rc, angles, t_start, grid, geom, "RC", use_cuda=False)
-    cr = delay_rca_channels(iq_cr, angles, t_start, grid, geom, "CR", use_cuda=False)
-    return power_doppler(opw_numpy(np.concatenate([rc, cr], axis=-1)[..., None]))
+    iq, _, _ = _delayed_angles(iq_rc, iq_cr, angles, t_start, grid, geom)
+    return power_doppler(opw_numpy(iq))
 
 
 def rc_fmas_pd_from_channels(
@@ -244,11 +248,8 @@ def rc_fmas_pd_from_channels(
         if out is not None:
             return out
 
-    rc = delay_rca_channels(iq_rc, angles, t_start, grid, geom, "RC", use_cuda=False)
-    cr = delay_rca_channels(iq_cr, angles, t_start, grid, geom, "CR", use_cuda=False)
-    rc_idx = np.arange(len(angles))
-    cr_idx = np.arange(len(angles), 2 * len(angles))
-    return rc_fmas_pd(np.concatenate([rc, cr], axis=-1)[..., None], rc_idx, cr_idx, use_cuda=False)
+    iq, ri, ci = _delayed_angles(iq_rc, iq_cr, angles, t_start, grid, geom)
+    return rc_fmas_pd(iq, ri, ci, use_cuda=False)
 
 
 def xdoppler_pd_from_channels(
@@ -290,8 +291,5 @@ def xdoppler_pd_from_channels(
         if out is not None:
             return out
 
-    rc = delay_rca_channels(iq_rc, angles, t_start, grid, geom, "RC", use_cuda=False)
-    cr = delay_rca_channels(iq_cr, angles, t_start, grid, geom, "CR", use_cuda=False)
-    rc_idx = np.arange(len(angles))
-    cr_idx = np.arange(len(angles), 2 * len(angles))
-    return xdoppler_pd(np.concatenate([rc, cr], axis=-1)[..., None], rc_idx, cr_idx, use_cuda=False)
+    iq, ri, ci = _delayed_angles(iq_rc, iq_cr, angles, t_start, grid, geom)
+    return xdoppler_pd(iq, ri, ci, use_cuda=False)

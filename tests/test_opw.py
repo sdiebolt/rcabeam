@@ -38,3 +38,33 @@ def test_synthetic_point_peaks_near_target() -> None:
     peak = np.unravel_index(np.argmax(pd), pd.shape)
     expected = (np.argmin(abs(x - point[0])), np.argmin(abs(z - point[1])), np.argmin(abs(y - point[2])))
     assert all(abs(a - b) <= 1 for a, b in zip(peak, expected, strict=True))
+
+
+def test_cpu_fast_power_delays_each_aperture_once(monkeypatch):
+    from rcabeam import fused
+
+    g = RCAGeometry(np.zeros(1), np.zeros(1), c=2, fs=1, f_demod=0, fnumber=None)
+    grid = (np.zeros(1), np.ones(1), np.zeros(1))
+    rc = np.full((3, 1, 2), 2 + 1j, dtype=np.complex64)
+    cr = rc * 2j
+    args = (rc, cr, np.zeros(2), 0, grid, g)
+    expected = [
+        fn(*args, use_cuda=False)
+        for fn in (
+            fused.opw_pd_from_channels,
+            fused.xdoppler_pd_from_channels,
+            fused.rc_fmas_pd_from_channels,
+        )
+    ]
+    delay = fused.delay_rca_channels
+    apertures = []
+
+    def counted(iq, angles, start, grid, geom, config, *, use_cuda):
+        assert not use_cuda
+        apertures.append(config)
+        return delay(iq, angles, start, grid, geom, config, use_cuda=False)
+
+    monkeypatch.setattr(fused, "delay_rca_channels", counted)
+    for actual, reference in zip(fused.fast_pd_from_channels(*args, use_cuda=False), expected, strict=True):
+        np.testing.assert_array_equal(actual, reference)
+    assert apertures == ["RC", "CR"]
