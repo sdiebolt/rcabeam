@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from time import perf_counter
 from typing import Literal, TypedDict
 
 import numpy as np
@@ -9,7 +10,7 @@ from numpy.typing import NDArray
 
 from rcabeam.sim import RCAGeometry, _scan_coords
 
-Method = Literal["opw", "xdoppler", "rc_fmas", "dmas", "st_sw"]
+Method = Literal["opw", "xdoppler", "rc_fmas", "dmas", "st_sw", "st_sw_baseband"]
 IQStorage = Literal["float32", "float16"]
 _METHODS = {"opw": 0, "xdoppler": 1, "rc_fmas": 2, "dmas": 3, "st_sw": 4, "apertures": 5}
 
@@ -158,8 +159,11 @@ def ensemble_pd_from_channels(
         Geometry and demodulation parameters.
     method
         Independent beamformer: OPW, XDoppler, RC-FMAS, DMAS-CCF-ACF, or St-SW.
+        `st_sw` uses conventional channel delays. `st_sw_baseband` approximates
+        the per-angle signals using one baseband plane at four samples per wavelength.
     k
-        Interleaved angle subsets for St-SW; supported range is 2 to 4.
+        Interleaved angle subsets for St-SW. Conventional St-SW supports 2 to 4,
+        and the baseband path supports 2.
     timings
         Optional dictionary populated with `raw_upload_seconds`: completed
         raw-channel H2D wall time, including staging but excluding allocation.
@@ -190,6 +194,26 @@ def ensemble_pd_from_channels(
     before power reduction. For XDoppler, filter both outputs of
     `beamform_apertures` before forming their complex cross-product.
     """
+    if method == "st_sw_baseband":
+        if k != 2 or iq_storage != "float32":
+            raise ValueError("Baseband St-SW requires k=2 and float32 IQ storage")
+        if rc.shape != cr.shape:
+            raise ValueError("RC and CR channel shapes must match")
+        import cupy as cp
+
+        from rcabeam.two_stage import TwoStageStswWorkspace
+
+        workspace = TwoStageStswWorkspace(rc.shape, angles, t_start, grid, geom)
+        host = [np.ascontiguousarray(raw, dtype=np.complex64) for raw in (rc, cr)]
+        gpu = [cp.empty(raw.shape, cp.complex64) for raw in host]
+        start = perf_counter()
+        for device, source in zip(gpu, host, strict=True):
+            device.set(source)
+        if timings is not None:
+            cp.cuda.Stream.null.synchronize()
+            timings["raw_upload_seconds"] = perf_counter() - start
+        _, power = workspace.reconstruct(*gpu)
+        return cp.asnumpy(power)
     return _run(rc, cr, angles, t_start, grid, geom, method, k, False, timings, iq_storage)[0]
 
 

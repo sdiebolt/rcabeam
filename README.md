@@ -117,6 +117,25 @@ measurement. Actual GPUDirect capability and RF-to-IQ ingress
 processing still need hardware validation. FPM power-only output reduces each
 coherently compounded chunk, saving the default **2.22 GB** full-IQ buffer.
 
+### Fast two-subset St-SW
+
+Use `method="st_sw_baseband"` for one-plane baseband St-SW with four axial
+samples per wavelength. For clutter-filtered power, supply RC and CR channels
+filtered with the same temporal basis.
+
+```python
+from rcabeam import ensemble_pd_from_channels
+
+power = ensemble_pd_from_channels(rc, cr, angles, t_start, grid, geom, method="st_sw_baseband")
+```
+
+On the 200-frame synthetic filtered scene, the one-plane pipeline took 360 ms
+versus 1,197 ms for conventional St-SW, with 6.65% relative weighted-power
+error. Use `method="st_sw"` for conventional reconstruction. For GPU-resident
+inputs, `TwoStageStswWorkspace` in `rcabeam.two_stage` returns both the weights
+and power, and accepts `n_planes=2` for the higher-accuracy filtered result.
+See the [weight-map and power comparisons](ROADMAP.md#two-subset-baseband-st-sw).
+
 ### Specialized research harnesses
 
 Advanced/compatibility module entrypoints remain available; their timing boundaries,

@@ -257,3 +257,28 @@ def test_two_stage_stsw_matches_per_angle_numpy(n_planes):
     np.testing.assert_allclose(cp.asnumpy(p), st_sw_pd(iq, ir, ic, k=2), rtol=0.003, atol=0.001)
     for v in ws.reconstruct(*[cp.zeros(shape, cp.complex64) for _ in range(2)]):
         np.testing.assert_array_equal(cp.asnumpy(v), 0)
+
+
+def test_baseband_stsw_ensemble_entry_point():
+    cp = pytest.importorskip("cupy")
+    from rcabeam import ensemble_pd_from_channels
+    from rcabeam.two_stage import TwoStageStswWorkspace
+
+    rc, cr, *geometry = _case(7)
+    # Exercise host staging with non-contiguous frame slices.
+    rc, cr = rc[..., ::2], cr[..., ::2]
+    workspace = TwoStageStswWorkspace(rc.shape, *geometry)
+    _, expected = workspace.reconstruct(*(cp.asarray(np.ascontiguousarray(v)) for v in (rc, cr)))
+    timings = {}
+    power = ensemble_pd_from_channels(rc, cr, *geometry, method="st_sw_baseband", timings=timings)
+    assert isinstance(power, np.ndarray) and power.dtype == np.float32
+    assert timings["raw_upload_seconds"] >= 0
+    np.testing.assert_array_equal(power, cp.asnumpy(expected))
+
+
+@pytest.mark.parametrize("options", [{"k": 3}, {"iq_storage": "float16"}])
+def test_baseband_stsw_requires_two_subsets_and_float32(options):
+    from rcabeam import ensemble_pd_from_channels
+
+    with pytest.raises(ValueError, match="k=2 and float32"):
+        ensemble_pd_from_channels(*_case(), method="st_sw_baseband", **options)
