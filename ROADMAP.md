@@ -1557,3 +1557,52 @@ shared OPW versus independent nonlinear normalization, signed-response display,
 and a real-GPU all-method smoke. Lint, changed-Python formatting, targeted typing
 and `git diff --check` pass. Both research viewer module help paths work. The
 benchmark's existing numerical/timing tests still pass after sharing helpers.
+
+## Reconstruction and filtered XDoppler experiments
+
+The common-phase five-target scene used 80+80 elements, 16 angles
+per aperture, 200 frames and an 80 × 157 × 80 grid. The table gives median warm
+reconstruction time from five randomly interleaved trials. Channels were
+already resident and conventional OPW had already packed its inputs. Complex IQ
+error uses frame zero. Power error uses all 200 frames. Both are relative L2
+errors against conventional DAS. Per-process monitoring detected no competing GPU activity.
+
+| Reconstruction | Resident ms | IQ error | Power error |
+|---|---:|---:|---:|
+| Conventional OPW | 342.8 | reference | reference |
+| Single plane, 8 samples/λ | 343.7 | 20.7% | 7.68% |
+| One baseband plane, 4 samples/λ | 224.7 | 20.9% | 4.54% |
+| Two baseband planes, 4 samples/λ | 276.7 | 12.8% | 6.82% |
+
+Prioritize one baseband plane for power and two for complex IQ in the next
+filtered-data comparison. Both preserve the receive aperture at the output
+depth. The two-plane option reduced IQ error at a cost of 52 ms over one plane.
+The one-plane option reduced power error and ran 1.53× faster than the
+existing single-plane implementation. These timings exclude filtering,
+transfers, workspace setup and JIT. Measure the complete pipeline and validate
+on moving blood before choosing a new default.
+
+For filtered XDoppler, use the shared RC/CR temporal basis and divide the
+complex cross-product sum by the original frame count. At both 8,192 and
+65,536 voxels with 200 frames, direct correlation in retained coordinates won
+through 160 retained modes. Forming residuals by subtracting discarded modes
+won from 180 through 199. At 65,536 voxels the respective times were 0.36 and
+3.49 ms for 20 retained modes, and 2.21 and 1.64 ms for 197. Seven interleaved
+trials measured the reduction after beamforming with the basis already
+available. Benchmark ranks between 160 and 180 before fixing a dispatch
+threshold. Use the existing fused reduction for inputs already filtered in the
+channel domain.
+
+Keep depth-windowed clutter-basis estimation opt-in. On the 48-frame synthetic
+moving-scatterer control, a strong reflector outside the image caused a
+single-mode full-window filter to suppress in-volume tissue by only 0.02 dB.
+The depth-limited estimate suppressed it by 65.7 dB with 0.01 dB of blood loss.
+Removing the outside reflector gave matching full- and depth-window results.
+Compute the window per aperture from the union of per-angle sample intervals,
+including their individual start times. Apply the shared basis to the full data.
+
+The research entry points are `_support.baseband_benchmark`,
+`_support.filtered_xdoppler_benchmark`, and `_support.clutter_window_benchmark`
+under `examples`. The focused GPU test run had 25 passes and one RC-FMAS
+selector assertion exceeding its CPU/GPU tolerance by roundoff. Both selector
+forms returned identical results on CUDA.
