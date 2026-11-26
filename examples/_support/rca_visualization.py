@@ -41,6 +41,7 @@ def main(*, show=True):
     import cupy as cp
 
     volumes = []
+    amplitude_layers = set()
     with console.status("Simulating shared acquisition…") as status:
         raw, angles, grid, geom = ensemble_scene(80, 80, 16, 1)
         shape = tuple(len(axis) for axis in grid)
@@ -53,6 +54,7 @@ def main(*, show=True):
                 volume = ensemble_pd_from_channels(raw[0], raw[1], angles, 2e-6, grid, geom, method=method)
                 if method == "dmas":
                     name += " response"
+                    amplitude_layers.add(name)
             check_volume(volume, shape)
             volumes.append((name, volume))
             cp.get_default_memory_pool().free_all_blocks()
@@ -73,6 +75,7 @@ def main(*, show=True):
         show_volumes(
             volumes,
             grid,
+            amplitude_layers=amplitude_layers,
             reference_peak={name: peak for name, _ in volumes[:2]},
             title="RCA beamformers - OPW/two-stage shared scale",
             grid_shape=(2, 4) if matrix is not None else (2, 3),

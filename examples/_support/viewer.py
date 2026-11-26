@@ -5,7 +5,9 @@ import os
 import numpy as np
 
 
-def show_volumes(volumes, grid, *, reference_peak=None, title="RCA beamforming", ndisplay=3, grid_shape=None):
+def show_volumes(
+    volumes, grid, *, reference_peak=None, amplitude_layers=(), title="RCA beamforming", ndisplay=3, grid_shape=None
+):
     """Display in physical mm; comparable methods may share a reference power peak.
 
     Nonlinear methods have different output scales and remain independently
@@ -23,7 +25,8 @@ def show_volumes(volumes, grid, *, reference_peak=None, title="RCA beamforming",
         peak = reference_peak.get(name) if isinstance(reference_peak, dict) else reference_peak
         peak = float(np.max(volume)) if peak is None else peak
         peak = max(peak, np.finfo(np.float32).tiny)
-        db = 10 * np.log10(np.maximum(volume / peak, 1e-8))
+        multiplier = 20 if name in amplitude_layers else 10
+        db = multiplier * np.log10(np.maximum(volume / peak, 10 ** (-80 / multiplier)))
         layer = viewer.add_image(
             db.transpose(1, 2, 0),
             name=f"{name} [dB]",
