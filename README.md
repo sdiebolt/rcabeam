@@ -44,8 +44,11 @@ uv run examples/benchmark.py --suite clutter --rank-start 3 --extended-clutter
 
 # Every RCA method in one napari viewer; FPM is included when installed.
 uv run examples/visualize.py
-# Reconstruct all layers without opening a window.
-uv run examples/visualize.py --headless
+# Compare St-SW power and weights on the same filtered tissue, blood and noise channels.
+uv run examples/visualize.py --scene filtered --view st-sw
+# Reconstruct once on a GPU and open the saved maps on a machine with napari.
+uv run examples/visualize.py --scene filtered --headless --save filtered.npz
+uv run examples/visualize.py --load filtered.npz
 
 # Acquisition storage and throughput estimates.
 uv run python examples/storage_estimate.py
@@ -86,15 +89,25 @@ modules.
 
 The supported top-level entrypoints are `benchmark.py`, `visualize.py`, and
 `storage_estimate.py`. Shared implementation and specialized research harnesses live under
-`examples/_support/`. The viewer also has no method or comparison selectors;
-its only operational option is `--headless` for a compute-only check.
-Visualization uses the same default acquisition but only one frame, then opens
-all six RCA layers in one napari window—no timing trials or PSF sweeps. Two-stage
-uses 8 samples/wavelength and is labeled approximate. OPW and two-stage share
-the conventional OPW reference scale; nonlinear RCA and FPM layers normalize
-independently because their output units/scales differ. Signed DMAS responses
-are clipped to the display floor, not squared. When installed, mach adds a
-seventh FPM layer on matched display axes; otherwise a skip notice is printed.
+`examples/_support/`. The viewer defaults to a one-frame, five-point-target acquisition.
+The eleven RCA maps include conventional, two-stage (8 samples/λ) and one-/two-plane
+baseband OPW (4 samples/λ), conventional and one-/two-plane baseband St-SW,
+XDoppler, conventional and half-sample cubic hybrid DMAS, and RC-FMAS. Installing
+mach adds a matrix FPM reference for the point-target scene.
+
+Use `--scene mixture` for a 200-frame synthetic ensemble of tissue, blood and
+noise. Use `--scene filtered` for the same seeded mixture after removal of the
+three strongest temporal modes. All methods in that view use the same filtered
+channels. Each conventional method and its approximations share a reference
+peak. Power maps use 10 log₁₀ and DMAS responses use 20 log₁₀ on positive
+amplitudes, clipping nonpositive values to the display floor.
+
+Use `--view opw`, `--view st-sw` or `--view dmas` to reconstruct just that
+family. The St-SW view shows weighted power above linear similarity weights
+on a fixed 0–1 scale. Focused and mixture views start on the lateral slice
+containing the conventional reference maximum. Scroll through depth–lateral
+sections in millimeters or switch to 3-D in napari. The one-frame point scene
+is useful for spatial comparisons; use the mixture for temporal weighting.
 
 RCA benchmark defaults: **15 MHz, 80+80 RCA elements, 16 RC + 16 CR angles, 200 frames**.
 All methods use **4–12 mm depth and lambda/2 maximum axial spacing**:
@@ -564,7 +577,7 @@ conventional packing, and full IQ D2H. Setup, JIT, simulation, and validation
 are excluded; GPU worker monitoring rejects overlapping compute jobs.
 Full-volume quality uses frame zero of the five-target common-phase ensemble;
 this is not a moving-blood or clutter-filtered validation.
-`visualize.py` includes frame-zero conventional and density-8 two-stage OPW
+The default point-target view includes frame-zero conventional and density-8 two-stage OPW
 alongside the other methods in 3-D MIP view, with physical millimeter coordinates
 and a shared conventional OPW reference dB scale. Switch to 2-D in napari to
 inspect slices; adjust the contrast floor below -40 dB to examine sidelobes.

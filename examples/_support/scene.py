@@ -72,7 +72,13 @@ def two_stage_power(raw, angles, grid, geom, timings=None):
     cp.cuda.Stream.null.synchronize()
     if timings is not None:
         timings["raw_upload_seconds"] = perf_counter() - start
-    iq = workspace.reconstruct(*gpu)
+    return mean_iq_power(workspace.reconstruct(*gpu))
+
+
+def mean_iq_power(iq):
+    """Reduce complex slow-time samples on the device and return host power."""
+    import cupy as cp
+
     mean_power = cp.ReductionKernel(
         "complex64 x",
         "float32 y",
@@ -83,6 +89,45 @@ def two_stage_power(raw, angles, grid, geom, timings=None):
         "benchmark_mean_power",
     )
     return cp.asnumpy(mean_power(iq, axis=-1))
+
+
+def native_maps(raw, grid, geom, angles, method):
+    """Reconstruct host or device channels, retaining the normalized St-SW weight map."""
+    from rcabeam._cuda_impl import ensemble_from_channels
+
+    from rcabeam.ensemble import _METHODS
+    from rcabeam.sim import _scan_coords
+
+    scan = _scan_coords(grid)
+    shape = tuple(map(len, grid))
+    pd = np.empty((len(scan), 2), np.float32)
+    weights = np.empty(len(scan) if method == "st_sw" else 0, np.float32)
+    ensemble_from_channels(
+        *raw,
+        scan,
+        np.float32(geom.x_el),
+        np.float32(geom.y_el),
+        np.float32(angles),
+        np.full(len(angles), 2e-6, np.float32),
+        pd,
+        np.empty((0, raw[0].shape[-1]), np.complex64),
+        weights,
+        geom.c,
+        geom.fs,
+        geom.f_demod,
+        -1.0 if geom.fnumber is None else geom.fnumber,
+        _METHODS[method],
+        2,
+        False,
+    )
+    volume = pd[:, 0].reshape(shape)
+    if not weights.size:
+        return volume, None
+    weights = weights.reshape(shape)
+    peak = weights.max()
+    if peak > 0:
+        weights /= peak
+    return volume * weights, weights
 
 
 def check_volume(volume, shape):

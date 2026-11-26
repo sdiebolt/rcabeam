@@ -8,13 +8,11 @@ from time import perf_counter
 
 import cupy as cp
 import numpy as np
-from rcabeam._cuda_impl import ensemble_from_channels
 
-from rcabeam.sim import _scan_coords
 from rcabeam.two_stage import TwoStageStswWorkspace
 
 from .clutter_scene import clutter_scene
-from .scene import ensemble_scene
+from .scene import ensemble_scene, native_maps
 
 
 def compare(actual, reference):
@@ -32,34 +30,8 @@ def compare(actual, reference):
 
 
 def conventional(raw, grid, geom, angles):
-    """Call the same native St-SW kernel as ensemble_pd_from_channels, retaining both maps."""
-    shape = tuple(len(v) for v in grid)
-    scan = _scan_coords(grid)
-    pd = np.empty((len(scan), 2), np.float32)
-    weights = np.empty(len(scan), np.float32)
-    signal = np.empty((0, raw[0].shape[-1]), np.complex64)
-    ensemble_from_channels(
-        *raw,
-        scan,
-        np.asarray(geom.x_el, np.float32),
-        np.asarray(geom.y_el, np.float32),
-        np.asarray(angles, np.float32),
-        np.full(len(angles), 2e-6, np.float32),
-        pd,
-        signal,
-        weights,
-        geom.c,
-        geom.fs,
-        geom.f_demod,
-        geom.fnumber,
-        4,
-        2,
-        False,
-    )
-    peak = weights.max()
-    if peak > 0:
-        weights /= peak
-    return weights.reshape(shape), (pd[:, 0] * weights).reshape(shape)
+    power, weights = native_maps(raw, grid, geom, angles, "st_sw")
+    return weights, power
 
 
 def main(argv=None):

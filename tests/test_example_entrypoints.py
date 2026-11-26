@@ -40,7 +40,7 @@ def test_visualize_runs_all_methods_without_selection(examples, monkeypatch, hea
 
     monkeypatch.setitem(sys.modules, "_support.rca_visualization", SimpleNamespace(main=run))
     assert entry.main(["--headless"] if headless else []) == ("volumes", "grid")
-    assert calls == [{"show": not headless}]
+    assert calls == [{"show": not headless, "scene": "targets", "view": "all", "save": None}]
 
 
 @pytest.mark.parametrize("args", [["rca"], ["two-stage"], ["interpolation"], ["--fast"]])

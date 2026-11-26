@@ -71,3 +71,10 @@ def test_napari_shared_scale_and_coordinates(monkeypatch):
     example.show_volumes([("Empty", np.zeros((1, 1, 1), np.float32))], tuple(np.zeros(1) for _ in range(3)))
     assert np.isfinite(layers[0][0]).all()
     assert layers[0][1]["scale"] == (1, 1, 1)
+
+    layers.clear()
+    weight = np.full(reference.shape, 0.35, np.float32)
+    example.show_volumes([("Weight", weight)], grid, weight_layers=("Weight",))
+    np.testing.assert_array_equal(layers[0][0], weight.transpose(1, 2, 0))
+    assert layers[0][1]["contrast_limits"] == (0, 1)
+    assert layers[0][1]["name"] == "Weight"

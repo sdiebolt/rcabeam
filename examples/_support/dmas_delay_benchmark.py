@@ -9,13 +9,11 @@ from time import perf_counter
 
 import cupy as cp
 import numpy as np
-from rcabeam._cuda_impl import ensemble_from_channels
 
 from rcabeam import two_stage
-from rcabeam.sim import _scan_coords
 
 from .clutter_scene import clutter_scene
-from .scene import TARGETS, ensemble_scene
+from .scene import TARGETS, ensemble_scene, native_maps
 
 
 def cuda_module():
@@ -27,27 +25,7 @@ def cuda_module():
 
 
 def conventional(raw, grid, geom, angles):
-    scan = _scan_coords(grid)
-    pd = np.empty((len(scan), 2), np.float32)
-    ensemble_from_channels(
-        *raw,
-        scan,
-        np.float32(geom.x_el),
-        np.float32(geom.y_el),
-        np.float32(angles),
-        np.full(len(angles), 2e-6, np.float32),
-        pd,
-        np.empty((0, raw[0].shape[-1]), np.complex64),
-        np.empty(0, np.float32),
-        geom.c,
-        geom.fs,
-        geom.f_demod,
-        -1.0 if geom.fnumber is None else geom.fnumber,
-        3,
-        2,
-        False,
-    )
-    return pd[:, 0].reshape(tuple(map(len, grid)))
+    return native_maps(raw, grid, geom, angles, "dmas")[0]
 
 
 def geometry(v, u, z, elements, angles, geom):
