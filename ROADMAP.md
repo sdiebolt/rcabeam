@@ -1666,3 +1666,73 @@ signals, unequal angle-subset sizes, a partial frame chunk and a zero ensemble.
 
 Reproduce with `PYTHONPATH=examples uv run python -m _support.stsw_baseband_benchmark --scene filtered`.
 Use `--scene common` and `--scene mixture` for the two unfiltered comparisons.
+
+### Channel-preserving DMAS
+
+DMAS needs the sum over angles for each receive channel before the complex
+signed square root. Angular coherence also needs the sum over receive channels
+for each angle. Computing these two sums separately avoids expanding a full
+channel-by-angle matrix at every voxel and frame. The nonlinear reduction and
+the average over all 200 frames use the conventional DMAS-CCF-ACF equations.
+
+Three experimental CUDA implementations compare the cost of forming those sums.
+
+- **Channel-resolved one plane** retains each receive channel through cubic
+  axial expansion at four samples/λ. The number of spline lines grows with
+  channel count. The receive mask is applied at output depth.
+- **Per-depth delay tables** factor the transmit and receive carrier rotations.
+  One table sums angles as a function of excess receive delay. A second sums
+  the active receive channels as a function of steering delay. Interpolation
+  between tabulated delays approximates the marginals. Table spacing is in
+  units of one fast-time IQ sample (50 ns here).
+- **Hybrid** shares the angle-compounded channel table across a slab of 16
+  output depths. For a depth offset Δz from the anchor, the common two-way
+  sample shift is 2Δz/c and the common transmit carrier rotation is
+  2πfΔz/c. The omitted angle-dependent delay is Δz(cos θ − 1)/c. At ±8°
+  the largest residual in these slabs is about 0.052 sample. Cubic lookup
+  evaluates each channel at its receive delay. The angular coherence factor
+  uses a baseband plane per aperture, with its receive mask evaluated at each
+  reference knot. This introduces a second approximation near aperture boundaries.
+
+The final comparison used 80+80 receive elements, 16+16 emissions, 200 frames at 500 Hz and an
+80 × 157 × 80 output grid. Each method used the same synthetic channel data.
+The timed filtered trials include host upload, estimation and removal of the
+three strongest shared RC/CR Gram modes, reconstruction and host download.
+Five trials per method were randomly interleaved after warm-up. Errors are
+whole-volume relative L2 against the conventional ensemble-mean DMAS response.
+
+| Filtered tissue/blood/noise scene | Median ms, including geometry | Response error | Global peak / reference |
+|---|---:|---:|---:|
+| Conventional DMAS-CCF-ACF | 2126.0 | reference | 100.0% |
+| Channel-resolved one plane | 5129.9 | 7.11% | 101.2% |
+| Per-depth tables, 0.25 sample | 1775.3 | 0.91% | 99.4% |
+| Hybrid, 0.5 sample, cubic | 383.8 | 4.50% | 101.0% |
+| Hybrid, 0.75 sample, cubic | 357.0 | 5.17% | 99.8% |
+
+Both hybrid settings met the 400 ms ensemble interval in all five trials,
+including geometry construction. At half-sample spacing the range was
+377.3–385.6 ms. The brightest voxel stayed in place. Peak responses in the
+3 × 3 × 3 neighborhoods of the five blood targets were 99.8%, 93.4%, 95.4%,
+96.2% and 94.3% of their respective conventional peaks. The synthetic scene
+uses fixed scatterers with time-varying amplitudes. Weak-vessel contrast in
+acquired data remains an open validation question.
+
+Reusing geometry across filtered ensembles reduced the half- and
+three-quarter-sample medians to 368.2 and 343.4 ms respectively.
+The unfiltered five-target control took 2070.8 ms for conventional DMAS and
+344.9 / 318.7 ms for the two hybrids including geometry, with response errors
+of 4.64% / 5.27%. Monitoring detected no competing GPU activity during the final comparisons. A broadside test with affine
+IQ, unequal lateral dimensions, a partial frame chunk and a partial depth
+slab checks all three prototypes against the NumPy DMAS reduction.
+
+Reproduce the filtered comparison from the repository root with
+
+```bash
+PYTHONPATH=examples uv run --extra gpu python -m _support.dmas_delay_benchmark \
+    --scene filtered --repeat 5 --slab 16 --steps 0.25 --cubic 0.5 0.75 --one-plane
+```
+
+Use `--reuse-geometry` for a repeated acquisition grid. Use `--scene common`
+for the unfiltered control and `--steps` with no values to skip the per-depth
+tables. The benchmark prints each trial and the per-target and whole-volume
+comparisons as JSON lines.
