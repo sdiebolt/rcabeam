@@ -626,3 +626,15 @@ the imaged depths. The optional window limits only the samples used to estimate
 the shared basis. Sample bounds include the per-angle acquisition start, steering,
 receive aperture, and a three-cycle pulse margin. The report gives retained
 tissue and blood power at each component's in-volume target at matched cutoffs.
+
+## Citation and releases
+
+If you use rcabeam in research, cite the DOI for the version you used.
+The software citation metadata is in [CITATION.cff](CITATION.cff).
+
+For the first release, enable `sdiebolt/rcabeam` in the maintainer’s
+[Zenodo GitHub settings](https://zenodo.org/account/settings/github/).
+For each release, set the version in `pyproject.toml` and `CITATION.cff`,
+update the lockfile with `uv lock`, and tag that commit as `vX.Y.Z`.
+Push the tag and publish its [GitHub Release](https://github.com/sdiebolt/rcabeam/releases).
+Zenodo then archives the tagged source and assigns that version a DOI.

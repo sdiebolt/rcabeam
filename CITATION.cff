@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+type: software
+title: rcabeam
+message: "If you use rcabeam in your research, please cite the archived version you used."
+authors:
+  - given-names: Samuel
+    family-names: Le Meur-Diebolt
+    orcid: "https://orcid.org/0000-0002-9788-7263"
+repository-code: "https://github.com/sdiebolt/rcabeam"
+abstract: >-
+  Experimental row-column-array ultrasound beamforming software with Python
+  bindings, CUDA kernels and NumPy reference implementations.
+keywords:
+  - ultrasound
+  - row-column arrays
+  - beamforming
+license: BSD-3-Clause
+version: "0.1.0"
