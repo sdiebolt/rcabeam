@@ -304,11 +304,13 @@ __global__ void beamform_tiled(const float2 *rc, const float2 *cr,
   constexpr unsigned mask = 0xffffffff;
   for (int offset = FRAME_LANES / 2; offset > 0; offset >>= 1) {
     pr += __shfl_down_sync(mask, pr, offset, FRAME_LANES);
-    pi += __shfl_down_sync(mask, pi, offset, FRAME_LANES);
+    if (METHOD == 1)
+      pi += __shfl_down_sync(mask, pi, offset, FRAME_LANES);
   }
   if (threadIdx.x % FRAME_LANES == 0) {
     atomicAdd(pd + 2 * voxel, pr / nt);
-    atomicAdd(pd + 2 * voxel + 1, pi / nt);
+    if (METHOD == 1)
+      atomicAdd(pd + 2 * voxel + 1, pi / nt);
   }
 }
 

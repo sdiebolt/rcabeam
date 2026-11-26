@@ -116,13 +116,16 @@ def sample_bandlimited_pulse(
         or not 0 < bandwidth_hz < fs
     ):
         raise ValueError("Require finite delays, nsamp >= 2, and 0 < bandwidth_hz < IQ sampling rate")
-    frequencies = np.fft.fftfreq(nsamp, d=1 / fs)
+    frequencies = np.fft.rfftfreq(nsamp, d=1 / fs)
     sigma_t = 2 * np.sqrt(6 * np.log(10) / 20) / (np.pi * bandwidth_hz)
     spectrum = np.exp(-((np.pi * sigma_t * frequencies) ** 2))
-    roll_off = np.clip((np.abs(frequencies) - bandwidth_hz / 2) / ((fs - bandwidth_hz) / 2), 0, 1)
+    roll_off = np.clip((frequencies - bandwidth_hz / 2) / ((fs - bandwidth_hz) / 2), 0, 1)
     spectrum *= (1 + np.cos(np.pi * roll_off)) / 2
     shifted = spectrum[:, None] * np.exp(-2j * np.pi * frequencies[:, None] * (delays[None, :] - t_start))
-    return np.fft.ifft(shifted, axis=0).real * (nsamp / np.sum(spectrum))
+    # Positive frequencies occur twice in the full spectrum, except for Nyquist
+    # on even-length transforms. DC occurs once for both parities.
+    total = 2 * spectrum.sum() - spectrum[0] - (spectrum[-1] if nsamp % 2 == 0 else 0)
+    return np.fft.irfft(shifted, n=nsamp, axis=0) * (nsamp / total)
 
 
 def simulate_point(
@@ -173,12 +176,12 @@ def simulate_point(
     v_rx = xp if config == "RC" else yp
     u_tx = yp if config == "RC" else xp
     t = t_start + np.arange(nsamp) / geom.fs
+    receive = np.sqrt(zp**2 + (v_rx - el) ** 2) / geom.c
     out = np.zeros((nsamp, len(el), len(angles)), dtype=np.complex64)
     for m, theta in enumerate(angles):
-        tau = (zp * np.cos(theta) + u_tx * np.sin(theta)) / geom.c + np.sqrt(zp**2 + (v_rx - el) ** 2) / geom.c
-        dt = t[:, None] - tau[None, :]
+        tau = (zp * np.cos(theta) + u_tx * np.sin(theta)) / geom.c + receive
         envelope = (
-            np.exp(-((dt / sigma_t) ** 2))
+            np.exp(-(((t[:, None] - tau) / sigma_t) ** 2))
             if bandwidth_hz is None
             else sample_bandlimited_pulse(tau, nsamp, t_start, geom.fs, bandwidth_hz)
         )
@@ -189,9 +192,11 @@ def simulate_point(
 def _scan_coords(grid: tuple[np.ndarray, np.ndarray, np.ndarray]) -> np.ndarray:
     """Return flattened `(x, z, y)` scan coordinates."""
     x, z, y = grid
-    return np.ascontiguousarray(
-        np.stack([v.ravel() for v in np.meshgrid(x, z, y, indexing="ij")], axis=-1), dtype=np.float32
-    )
+    coords = np.empty((len(x), len(z), len(y), 3), dtype=np.float32)
+    coords[..., 0] = np.asarray(x)[:, None, None]
+    coords[..., 1] = np.asarray(z)[:, None]
+    coords[..., 2] = y
+    return coords.reshape(-1, 3)
 
 
 def delay_rca_channels(
@@ -337,21 +342,26 @@ _DELAY_BLOCK_PAIRS = 65536
 
 
 def _delay_numpy(iq, angles, t_start, grid, geom, config, *, channels_out, aperture_depth=None):
+    """Delay one frame or a trailing frame batch with shared sample geometry."""
     if config not in ("RC", "CR"):
         raise ValueError("config must be 'RC' or 'CR'")
     x, z, y = map(np.asarray, grid)
     shape = (len(x), len(z), len(y))
-    ns, nc, na = iq.shape
+    ns, nc, na = iq.shape[:3]
+    frame_shape = iq.shape[3:]
+    if not frame_shape:
+        iq = iq[..., None]
+    frames = iq.shape[-1]
     elements = np.asarray(geom.x_el if config == "RC" else geom.y_el)
     if ns < 2 or nc < 1 or len(elements) != nc or len(angles) != na:
         raise ValueError("Expected at least two samples and matching channel/angle dimensions")
     starts = np.broadcast_to(t_start, (na,))
     channels = np.arange(nc)
     voxels = int(np.prod(shape))
-    per_angle = np.empty((voxels, na), np.complex64)
-    per_channel = np.zeros((voxels, nc), np.complex64) if channels_out else None
+    per_angle = np.empty((voxels, na, frames), np.complex64)
+    per_channel = np.zeros((voxels, nc, frames), np.complex64) if channels_out else None
     counts = np.empty(voxels, np.float32) if channels_out else None
-    block_size = max(1, _DELAY_BLOCK_PAIRS // nc)
+    block_size = max(1, _DELAY_BLOCK_PAIRS // (nc * frames))
     for first in range(0, voxels, block_size):
         block = slice(first, min(first + block_size, voxels))
         ix, iz, iy = np.unravel_index(np.arange(first, block.stop), shape)
@@ -370,14 +380,14 @@ def _delay_numpy(iq, angles, t_start, grid, geom, config, *, channels_out, apert
             valid = (sample >= 0) & (sample <= ns - 1)
             sample = np.clip(sample, 0, ns - 1)
             lower = sample.astype(np.intp)
-            w = (sample - lower).astype(np.float32)
+            w = (sample - lower).astype(np.float32)[..., None]
             delayed = (1 - w) * iq[lower, channels, m] + w * iq[np.minimum(lower + 1, ns - 1), channels, m]
-            delayed *= np.exp(2j * np.pi * geom.f_demod * tau) * (active & valid)
+            delayed *= (np.exp(2j * np.pi * geom.f_demod * tau) * (active & valid))[..., None]
             per_angle[block, m] = delayed.sum(axis=1)
             if per_channel is not None:
                 per_channel[block] += delayed
     return (
-        per_channel.reshape((*shape, nc)) if per_channel is not None else None,
-        per_angle.reshape((*shape, na)),
+        per_channel.reshape((*shape, nc, *frame_shape)) if per_channel is not None else None,
+        per_angle.reshape((*shape, na, *frame_shape)),
         counts.reshape(shape) if counts is not None else None,
     )

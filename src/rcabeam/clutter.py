@@ -19,13 +19,15 @@ def _basis(matrix: np.ndarray, method: Solver) -> tuple[np.ndarray, np.ndarray]:
     frames = matrix.shape[-1]
     if method == "svd":
         # A wide matrix needs full V, but a tall matrix must not allocate square U.
-        _, singular_values, vh = np.linalg.svd(matrix.astype(np.complex128), full_matrices=matrix.shape[0] < frames)
+        _, singular_values, vh = np.linalg.svd(
+            matrix.astype(np.complex128, copy=False), full_matrices=matrix.shape[0] < frames
+        )
         singular_values = np.pad(singular_values, (0, frames - len(singular_values)))
         basis = vh.conj().T
     elif method == "gram":
         gram = np.zeros((frames, frames), dtype=np.complex128)
         for start in range(0, len(matrix), 16384):
-            block = matrix[start : start + 16384].astype(np.complex128)
+            block = matrix[start : start + 16384].astype(np.complex128, copy=False)
             gram += block.conj().T @ block
         if not np.isfinite(gram).all():
             raise np.linalg.LinAlgError("Nonfinite Gram matrix; rescale the IQ input")
@@ -93,7 +95,7 @@ def svd_clutter_filter(
     frames = matrix.shape[-1]
     rank_start, stop = _rank_interval(frames, rank_start, rank_stop)
     if method == "svd":
-        u, values, vh = np.linalg.svd(matrix.astype(np.complex128), full_matrices=False)
+        u, values, vh = np.linalg.svd(matrix.astype(np.complex128, copy=False), full_matrices=False)
         values[:rank_start] = 0
         values[stop:] = 0
         reconstructed = (u * values) @ vh
@@ -101,7 +103,7 @@ def svd_clutter_filter(
         _, basis = _basis(matrix, method)
         retained = basis[:, rank_start:stop]
         reconstructed = (matrix @ retained) @ retained.conj().T
-    filtered = reconstructed.reshape(iq.shape).astype(iq.dtype)
+    filtered = reconstructed.reshape(iq.shape).astype(iq.dtype, copy=False)
     if not np.isfinite(filtered).all():
         raise np.linalg.LinAlgError("Nonfinite filtered IQ; rescale the input")
     return filtered

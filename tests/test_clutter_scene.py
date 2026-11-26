@@ -1,7 +1,6 @@
 """Scene ground truth stays reproducible without changing the old benchmark."""
 
 import importlib
-import json
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -102,52 +101,41 @@ def test_blood_statistics_and_slow_tissue_modulation(clutter):
 )
 def test_clutter_benchmark_invalid_arguments(clutter, args):
     with pytest.raises(SystemExit, match="2"):
-        importlib.import_module("_support.clutter_benchmark").main(args)
+        importlib.import_module("benchmark").main(["--suite", "clutter", *args])
 
 
-@pytest.mark.parametrize("save_details", [False, True])
-@pytest.mark.parametrize("filters,frames", [(False, 16), (True, 16), (True, 200)])
-def test_clutter_benchmark_small_gpu_checkpoint(clutter, monkeypatch, capsys, tmp_path, save_details, filters, frames):
+@pytest.mark.parametrize("frames", [16, 200])
+def test_clutter_benchmark_small_gpu_checkpoint(clutter, monkeypatch, capsys, frames):
     pytest.importorskip("rcabeam._cuda_impl")
     pytest.importorskip("cupy")
     benchmark = importlib.import_module("_support.clutter_benchmark")
     monkeypatch.setattr(benchmark, "monitor_gpu", lambda bus: nullcontext([]))
-    args = ["--grid", "3", "--elements", "4", "--angles", "2", "--frames", str(frames), "--repeat", "1"]
-    output = tmp_path / "details.json"
-    if save_details:
-        args += ["--output", str(output)]
-    if filters:
-        pipeline = importlib.import_module("_support.clutter_pipeline")
-        monkeypatch.setattr(pipeline, "monitor_gpu", lambda bus: nullcontext([]))
-        args += ["--rank-start", "2", "--rank-stop", str(12 if frames == 16 else frames)]
-    report = benchmark.main(args)
-    assert report["stage"] == ("gpu_filtered_baselines" if filters else "scene_only_unfiltered")
-    if filters:
-        assert len(report["filtered"]) == 8
-        for case in report["filtered"].values():
-            assert "skipped" not in case
-            assert len(case["trials"]) == 1
-            trial = case["trials"][0]
-            assert trial["peak_cupy_bytes"] > 0 and trial["total_ms"] > 0
-            assert trial["decomposition_ms"]["matrix_ms"] >= 0
-            assert trial["decomposition_ms"]["decomposition_ms"] >= 0
-            assert trial["stages_ms"]["clutter_ms"] >= 0
-            assert "pd_error_vs_svd128" in case
-            assert 0 <= case["component_retention"]["blood_power_fraction"] <= 1 + 1e-5
-            if frames == 200 and trial["gram_diagnostics"]:
-                assert trial["projector_modes"] == 2
+    pipeline = importlib.import_module("_support.clutter_pipeline")
+    monkeypatch.setattr(pipeline, "monitor_gpu", lambda bus: nullcontext([]))
+    report = benchmark.run(
+        grid=3, elements=4, angles=2, frames=frames, repeat=1, rank_start=2, rank_stop=12 if frames == 16 else frames
+    )
+    assert report["stage"] == "gpu_filtered_baselines"
+    assert len(report["filtered"]) == 8
+    for case in report["filtered"].values():
+        assert "skipped" not in case
+        assert len(case["trials"]) == 1
+        trial = case["trials"][0]
+        assert trial["peak_cupy_bytes"] > 0 and trial["total_ms"] > 0
+        assert trial["decomposition_ms"]["matrix_ms"] >= 0
+        assert trial["decomposition_ms"]["decomposition_ms"] >= 0
+        assert trial["stages_ms"]["clutter_ms"] >= 0
+        assert "pd_error_vs_svd128" in case
+        assert 0 <= case["component_retention"]["blood_power_fraction"] <= 1 + 1e-5
+        if frames == 200 and trial["gram_diagnostics"]:
+            assert trial["projector_modes"] == 2
     assert report["component_additivity_relative_error"] < 5e-4
     assert report["diagnostics"]["mixture"]["modes_above_0.001_peak"] > 1
     assert report["timings"][0]["total_ms"] > 0
     assert report["timings"][0]["raw_h2d_ms"] > 0
     text = capsys.readouterr().out
-    assert ("GPU filters" if filters else "no filter") in text and "Validation passed" in text
+    assert "GPU filters" in text and "Validation passed" in text
     assert '"singular_values"' not in text and '"telemetry_' not in text
-    if save_details:
-        assert json.loads(output.read_text()) == report
-        assert "Details saved to" in text
-    else:
-        assert not output.exists()
 
 
 def test_filtered_comparison_reports_memory_skip_without_fallback(clutter, monkeypatch):

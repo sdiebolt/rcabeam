@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 from rcabeam.matrix import matrix_apertures, plane_wave_tx_offset
 
 from .matrix_helpers import _scan_grid, _simulate_matrix_iq, _tx_arrivals
+from .scene import power_kernel
 
 
 def benchmark_matrix_ensemble(
@@ -144,15 +145,7 @@ def benchmark_matrix_ensemble(
                     rx,
                 )
             )
-    mean_power = cp.ReductionKernel(
-        "complex64 x",
-        "float32 y",
-        "x.real()*x.real()+x.imag()*x.imag()",
-        "a+b",
-        "y = a / (_in_ind.size() / _out_ind.size())",
-        "0",
-        "matrix_mean_power",
-    )
+    mean_power = power_kernel()
     start_event, stop_event = cp.cuda.Event(), cp.cuda.Event()
     best, best_gpu, best_upload = float("inf"), 0.0, 0.0
     result = np.empty(0)

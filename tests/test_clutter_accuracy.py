@@ -1,7 +1,6 @@
 """Numerical envelope has controlled inputs, explicit failures and component probes."""
 
 import importlib
-import json
 from itertools import pairwise
 from pathlib import Path
 
@@ -41,10 +40,10 @@ def test_overlap_is_not_orthogonal_and_strength_is_paired(accuracy):
     np.testing.assert_allclose(np.linalg.norm(a["noise"]) / np.linalg.norm(a["blood"]), 0.1)
 
 
-@pytest.mark.parametrize("args", [["--frames", "15"], ["--rows", "16"], ["--seeds", "0"], ["--input-dtype", "float32"]])
-def test_invalid_accuracy_arguments(accuracy, args):
-    with pytest.raises(SystemExit, match="2"):
-        accuracy.main(args)
+@pytest.mark.parametrize("options", [dict(frames=15), dict(rows=16), dict(seeds=0), dict(input_dtype="float32")])
+def test_invalid_accuracy_arguments(accuracy, options):
+    with pytest.raises(ValueError):
+        accuracy.run(**{"input_dtype": "complex128", **options})
 
 
 @pytest.mark.parametrize("input_dtype", ["complex64", "complex128"])
@@ -158,16 +157,11 @@ def test_accuracy_spans_gram_and_projection_chunks(accuracy):
         assert result["metrics"]["tissue_error_over_input_blood"] < 1e-3
 
 
-@pytest.mark.parametrize("save", [False, True])
-def test_accuracy_cli_compact_output_and_optional_strict_json(accuracy, monkeypatch, tmp_path, capsys, save):
+def test_accuracy_compact_output(accuracy, monkeypatch, capsys):
     pytest.importorskip("cupy")
     monkeypatch.setattr(accuracy, "RATIOS", (10.0,))
     monkeypatch.setattr(accuracy, "GAPS", (2.0,))
-    path = tmp_path / "accuracy.json"
-    args = ["--rows", "32", "--frames", "16", "--seeds", "1"]
-    if save:
-        args += ["--output", str(path)]
-    report = accuracy.main(args)
+    report = accuracy.run(rows=32, frames=16, seeds=1, input_dtype="complex128")
     assert len(report["cases"]) == 4
     assert report["input_dtype"] == "complex128"
     assert report["cupy_complex64_compute_type"]
@@ -175,7 +169,3 @@ def test_accuracy_cli_compact_output_and_optional_strict_json(accuracy, monkeypa
     text = capsys.readouterr().out
     assert "Worst errors" in text and "EVD64" in text and "SVD128" in text
     assert '"singular_values"' not in text and len(text.splitlines()) < 85
-    if save:
-        assert json.loads(path.read_text()) == report
-    else:
-        assert not path.exists()

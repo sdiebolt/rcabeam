@@ -34,9 +34,10 @@ def experiment(monkeypatch):
         ["--rank-start", "2", "--frames", "1"],
     ],
 )
-def test_invalid_arguments(experiment, args):
+def test_invalid_arguments(monkeypatch, args):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "examples"))
     with pytest.raises(SystemExit, match="2"):
-        experiment.main(args)
+        importlib.import_module("benchmark").main(["--suite", "pipeline", *args])
 
 
 def test_quality_uses_identical_filtered_channels_and_numpy_reference(experiment, monkeypatch):
@@ -132,7 +133,9 @@ def test_full_pipeline_smoke_compact_output_and_json(experiment, tmp_path, capsy
     ]
     if save:
         args += ["--output", str(path)]
-    report = experiment.main(args)
+    report = importlib.import_module("benchmark").main(["--suite", "pipeline", *args])
+    aggregate = report
+    report = aggregate["suites"]["pipeline"]
     assert report["stage"] == "two_stage_channel_clutter"
     for key, case in report["results"]["cases"].items():
         assert "skipped" not in case and "failed" not in case
@@ -149,7 +152,7 @@ def test_full_pipeline_smoke_compact_output_and_json(experiment, tmp_path, capsy
     assert '"basis"' not in text and '"telemetry_' not in text
     assert len(text.splitlines()) < 50
     if save:
-        assert json.loads(path.read_text()) == report
+        assert json.loads(path.read_text()) == aggregate
     else:
         assert not path.exists()
 

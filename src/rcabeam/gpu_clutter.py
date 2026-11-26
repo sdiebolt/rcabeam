@@ -209,10 +209,10 @@ def _filter_vectors(basis: cp.ndarray, frames: int, start: int, stop: int) -> tu
     return vectors, subtract
 
 
-def _filtered_block(block: cp.ndarray, vectors: cp.ndarray, subtract: bool) -> cp.ndarray:
+def _filtered_block(block: cp.ndarray, vectors: cp.ndarray, adjoint: cp.ndarray, subtract: bool) -> cp.ndarray:
     if vectors.shape[1] == 0:
         return block if subtract else cp.zeros_like(block)
-    projected = (block @ vectors) @ vectors.conj().T
+    projected = (block @ vectors) @ adjoint
     return block - projected if subtract else projected
 
 
@@ -227,13 +227,14 @@ def apply_temporal_filter(iq: IQ, basis: cp.ndarray, *, rank_start: int, rank_st
     frames = arrays[0].shape[-1]
     start, stop = _rank_interval(frames, rank_start, rank_stop)
     vectors, subtract = _filter_vectors(basis, frames, start, stop)
+    adjoint = vectors.conj().T
     result = []
     for array in arrays:
         matrix = array.reshape(-1, frames)
         filtered = cp.empty(matrix.shape, array.dtype)
         for first in range(0, len(matrix), 16384):
-            block = matrix[first : first + 16384].astype(basis.dtype)
-            filtered[first : first + len(block)] = _filtered_block(block, vectors, subtract)
+            block = matrix[first : first + 16384].astype(basis.dtype, copy=False)
+            filtered[first : first + len(block)] = _filtered_block(block, vectors, adjoint, subtract)
         if not bool(cp.isfinite(filtered).all()):
             raise np.linalg.LinAlgError("Nonfinite filtered IQ; rescale the input")
         result.append(filtered.reshape(array.shape))
@@ -258,11 +259,12 @@ def filtered_power(iq: cp.ndarray, basis: cp.ndarray, *, rank_start: int, rank_s
     if start == stop:
         return cp.zeros(iq.shape[:-1], cp.float64)
     matrix = iq.reshape(-1, frames)
+    adjoint = vectors.conj().T if subtract else None
     power = cp.empty(len(matrix), cp.float64)
     for first in range(0, len(matrix), 16384):
-        block = matrix[first : first + 16384].astype(basis.dtype)
+        block = matrix[first : first + 16384].astype(basis.dtype, copy=False)
         if subtract:
-            values = _filtered_block(block, vectors, True)
+            values = _filtered_block(block, vectors, adjoint, True)
         else:
             values = block @ vectors
         power[first : first + len(block)] = _mean_power(values, axis=-1) * (values.shape[1] / frames)

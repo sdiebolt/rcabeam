@@ -160,20 +160,12 @@ def two_stage_opw_numpy(rc, cr, angles, t_start, grid, geom, *, samples_per_wave
         for config, raw, elevation, layout in (("RC", rc, y, layouts[1]), ("CR", cr, x, layouts[0])):
             centers, nearest, offset = layout
             plane_grid = (x, knots, centers) if config == "RC" else (centers, knots, y)
-            values = []
-            for frame in range(shape[-1]):
-                _, a, _ = _delay_numpy(
-                    raw[..., frame],
-                    angles,
-                    starts,
-                    plane_grid,
-                    snapshot,
-                    config,
-                    channels_out=False,
-                    aperture_depth=z[band.start],
-                )
-                values.append(a if config == "RC" else a.transpose(2, 1, 0, 3))
-            planes = np.stack(values, axis=-1).astype(np.complex128)
+            _, delayed, _ = _delay_numpy(
+                raw, angles, starts, plane_grid, snapshot, config, channels_out=False, aperture_depth=z[band.start]
+            )
+            if config == "CR":
+                delayed = delayed.transpose(2, 1, 0, 3, 4)
+            planes = delayed.astype(np.complex128)
             if baseband:
                 kz, ku = _reference_wavenumbers(angles, geom)
                 phase = knots[:, None, None] * kz + centers[None, :, None] * ku

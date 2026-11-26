@@ -37,29 +37,6 @@ extern "C" __global__ void channel_table(const float2 *raw, const float4 *tx,
   out[(size_t)entry * nt + t] = sum;
 }
 
-extern "C" __global__ void angle_table(const float2 *raw, const float4 *rx,
-                                       const float *base, const float *shift0,
-                                       float2 *out, int ns, int nc, int na,
-                                       int nt, int nl, int zfirst, int nk,
-                                       float step) {
-  int entry = blockIdx.x, k = entry % nk, a = entry / nk % na,
-      line = entry / nk / na % nl;
-  int z = zfirst + entry / nk / na / nl,
-      t = blockIdx.y * blockDim.x + threadIdx.x;
-  if (t >= nt)
-    return;
-  float pos = base[z * na + a] + shift0[a] + k * step;
-  float2 sum = {};
-  for (int ch = 0; ch < nc; ++ch) {
-    float4 r = rx[(z * nl + line) * nc + ch];
-    if (r.x < 0)
-      continue;
-    const float2 *trace = raw + ((size_t)ch * na + a) * ns * nt;
-    sum = add(sum, rotate(sample(trace, pos + r.x, ns, nt, t), r));
-  }
-  out[(size_t)entry * nt + t] = sum;
-}
-
 __device__ float2 table_value(const float2 *p, int row, int nk, int nt, int t,
                               float position) {
   int i = min((int)position, nk - 2);
@@ -116,105 +93,6 @@ __device__ void store_power(float *out, int voxel, float p, int nt) {
     atomicAdd(out + voxel, p / nt);
 }
 
-extern "C" __global__ void finish_tables(const float2 *crx, const float2 *ctx,
-                                         const float2 *arx, const float2 *atx,
-                                         const float4 *rx0, const float4 *tx0,
-                                         const float4 *rx1, const float4 *tx1,
-                                         float *out, int nx, int nz, int ny,
-                                         int nc, int na, int nt, int first,
-                                         int nq, int nsft, float istep) {
-  int iy = blockIdx.x % ny, ix = (blockIdx.x / ny) % nx;
-  int localz = blockIdx.x / ny / nx, z = first + localz;
-  int t = blockIdx.y * blockDim.x + threadIdx.x;
-  Stats s = {};
-  if (t < nt) {
-    for (int conf = 0; conf < 2; ++conf) {
-      int v = conf ? iy : ix, u = conf ? ix : iy, nv = conf ? ny : nx,
-          nu = conf ? nx : ny;
-      const float4 *rx = (conf ? rx1 : rx0) + (z * nv + v) * nc;
-      const float4 *tx = (conf ? tx1 : tx0) + (z * nu + u) * na;
-      const float2 *c = conf ? ctx : crx, *a = conf ? atx : arx;
-      for (int ch = 0; ch < nc; ++ch) {
-        float4 r = rx[ch];
-        if (r.x < 0)
-          continue;
-        int row = (localz * nu + u) * nc + ch;
-        channel_stat(s, rotate(table_value(c, row, nq, nt, t, r.x * istep), r));
-      }
-      for (int angle = 0; angle < na; ++angle) {
-        float4 b = tx[angle];
-        int row = (localz * nv + v) * na + angle;
-        angle_stat(s, conf,
-                   rotate(table_value(a, row, nsft, nt, t, b.w * istep), b));
-      }
-    }
-  }
-  store_power(out, (ix * nz + z) * ny + iy, power(s, na), nt);
-}
-
-// Benchmark the direct one-plane extension alongside the delay tables. The
-// shared spline and lookup routines come from two_stage.cu; each line here
-// represents one (lateral coordinate, receive channel) pair.
-extern "C" __global__ void
-channel_planes(const float2 *raw, const float4 *plane_rx, const float *plane_tx,
-               float2 *out, int nk, int nc, int na, int ns, int nt, int first,
-               int count, int lines) {
-  size_t id = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-  int t = id % 32;
-  size_t point = id / 32;
-  if (point >= (size_t)lines * nk * na || t >= count)
-    return;
-  int a = point % na, k = point / na % nk, line = point / na / nk;
-  float4 r = plane_rx[line * nk + k];
-  const float2 *trace = raw + ((size_t)(line % nc) * na + a) * ns * nt;
-  out[id] =
-      rotate(sample(trace, r.x + plane_tx[k * na + a], ns, nt, first + t), r);
-}
-
-extern "C" __global__ void
-finish_planes(const float2 *rc, const float2 *cr, const float2 *src,
-              const float2 *scr, const float4 *rx0, const float4 *tx0,
-              const float4 *rx1, const float4 *tx1, float *out, int nx, int nz,
-              int ny, int nc, int na, int nt, int nk, int count) {
-  int voxel = blockIdx.x * 4 + threadIdx.x / 32, t = threadIdx.x % 32;
-  if (voxel >= nx * nz * ny)
-    return;
-  int vgrid[2] = {voxel / nz / ny, voxel % ny}, z = voxel / ny % nz;
-  Stats s = {};
-  if (t < count) {
-    for (int conf = 0; conf < 2; ++conf) {
-      int nv = conf ? ny : nx, nu = conf ? nx : ny;
-      int v = vgrid[conf], u = vgrid[1 - conf];
-      const float4 *rx = (conf ? rx1 : rx0) + (z * nv + v) * nc;
-      const float4 *tx = (conf ? tx1 : tx0) + (z * nu + u) * na;
-      float2 angles[16] = {};
-      for (int ch = 0; ch < nc; ++ch) {
-        if (rx[ch].x < 0)
-          continue;
-        float2 sum = {};
-#pragma unroll
-        for (int a = 0; a < 16; ++a)
-          if (a < na) {
-            float4 b = tx[a];
-            float2 val = lookup(conf ? cr : rc, conf ? scr : src, v * nc + ch,
-                                a, t, na, nk, 32, b.x);
-            val = rotate(val, b);
-            sum = add(sum, val);
-            angles[a] = add(angles[a], val);
-          }
-        channel_stat(s, sum);
-      }
-      for (int a = 0; a < na; ++a)
-        angle_stat(s, conf, angles[a]);
-    }
-  }
-  store_power(out, voxel, power(s, na), nt);
-}
-
-// Hybrid: the channel table shares one transmit law across a short axial slab.
-// Shift its sample origin by 2*dz/c and rotate the common carrier by
-// omega*dz/c. The angle-dependent residual transmit time is
-// dz*(cos(theta)-1)/c.
 extern "C" __global__ void angle_plane(const float2 *raw, const float4 *rx,
                                        const float *tx, float2 *out, int nk,
                                        int nc, int na, int ns, int nt) {

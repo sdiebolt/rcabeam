@@ -57,7 +57,7 @@ class ClutterScene:
             rng = np.random.default_rng(self.seed + 100 + config)
             for start in range(0, len(rows), 16384):
                 block = data[start : start + 16384]
-                block[:] = rows[start : start + 16384, selected] @ self.temporal[selected]
+                np.matmul(rows[start : start + 16384, selected], self.temporal[selected], out=block)
                 if component in ("mixture", "noise"):
                     block.real += self.noise_std * rng.standard_normal(block.shape, dtype=np.float32)
                     block.imag += self.noise_std * rng.standard_normal(block.shape, dtype=np.float32)

@@ -1,13 +1,6 @@
-"""Scene diagnostics and optional full-frame GPU SVD/Gram-EVD comparisons.
+"""Scene diagnostics and filtered OPW comparisons in image and channel domains."""
 
-Use --rank-start to enable filtered pipelines with an explicit synthetic cutoff.
-The existing all-method benchmark/scene is unchanged.
-"""
-
-import argparse
 import gc
-import json
-from pathlib import Path
 from statistics import median
 from time import perf_counter
 
@@ -16,7 +9,6 @@ from rich.console import Console
 from rich.table import Table
 
 from rcabeam import beamform_ensemble, ensemble_pd_from_channels
-from rcabeam.clutter import _rank_interval
 from rcabeam.ensemble import EnsembleTiming
 from rcabeam.sim import delay_rca_channels
 
@@ -62,39 +54,16 @@ def check_sampled_iq(raw, scene, grid, actual):
             np.testing.assert_allclose(actual[(*point, frame)], expected, rtol=0.004, atol=0.004)
 
 
-def main(argv=None):
-    """Run scene diagnostics, optionally followed by filtered OPW comparisons."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--grid", type=int, default=80)
-    parser.add_argument("--elements", type=int, default=80)
-    parser.add_argument("--angles", type=int, default=16)
-    parser.add_argument("--frames", type=int, default=200)
-    parser.add_argument("--repeat", type=int, default=3)
-    parser.add_argument("--output", type=Path, help="Save detailed spectra, timings and telemetry as JSON")
-    parser.add_argument(
-        "--rank-start", type=int, help="Enable GPU filters; first retained zero-based rank (no automatic cutoff)"
-    )
-    parser.add_argument("--rank-stop", type=int, help="Exclusive final rank; defaults to the original frame count")
-    args = parser.parse_args(argv)
-    if min(args.grid, args.elements, args.angles, args.repeat) < 1 or args.frames < 2:
-        parser.error("Positive dimensions/repeats and at least two frames are required")
-    if args.rank_stop is not None and args.rank_start is None:
-        parser.error("--rank-stop requires --rank-start")
-    if args.rank_start is not None:
-        try:
-            args.rank_start, args.rank_stop = _rank_interval(args.frames, args.rank_start, args.rank_stop)
-        except ValueError as error:
-            parser.error(str(error))
+def run(*, grid, elements, angles, frames, repeat, rank_start, rank_stop):
     import cupy as cp
 
     console = Console()
     bus = cp.cuda.Device().pci_bus_id
     with monitor_gpu(bus):
-        scene = clutter_scene(args.grid, args.elements, args.angles, args.frames)
+        scene = clutter_scene(grid, elements, angles, frames)
     grid = sampled_grid(scene.grid)
-    title = "Clutter scene (no filter)" if args.rank_start is None else "Clutter scene + GPU filters"
     console.print(
-        f"[bold]{title}[/bold] | {args.frames} frames | {scene.prf_hz:g} Hz PRF\n"
+        f"[bold]Clutter scene + GPU filters[/bold] | {frames} frames | {scene.prf_hz:g} Hz PRF\n"
         "Synthetic fixed-position tissue + blood + noise; not acquired-data validation."
     )
     sampled = {}
@@ -123,7 +92,7 @@ def main(argv=None):
                 np.testing.assert_allclose(
                     reference[selection], np.mean(np.abs(iq) ** 2, axis=-1), rtol=0.002, atol=0.002
                 )
-                for _ in range(args.repeat):
+                for _ in range(repeat):
                     metrics: EnsembleTiming = {"raw_upload_seconds": 0.0}
                     cp.cuda.Stream.null.synchronize()
                     start = perf_counter()
@@ -136,7 +105,7 @@ def main(argv=None):
                     timings.append({"total_ms": elapsed * 1e3, "raw_h2d_ms": metrics["raw_upload_seconds"] * 1e3})
                 del reference, volume
         telemetry.extend(samples)
-        if component == "mixture" and args.rank_start is not None:
+        if component == "mixture":
             from .clutter_pipeline import compare_filters
 
             with console.status("Comparing GPU filters (warm-up and interleaved trials)..."):
@@ -145,13 +114,13 @@ def main(argv=None):
                     scene,
                     iq,
                     grid,
-                    rank_start=args.rank_start,
-                    rank_stop=args.rank_stop,
-                    repeat=args.repeat,
+                    rank_start=rank_start,
+                    rank_stop=rank_stop,
+                    repeat=repeat,
                     bus=bus,
                 )
         sampled[component] = iq
-        singular_values = np.linalg.svd(iq.reshape(-1, args.frames).astype(np.complex128), compute_uv=False)
+        singular_values = np.linalg.svd(iq.reshape(-1, frames).astype(np.complex128), compute_uv=False)
         energy = float(np.sum(singular_values**2))
         if energy == 0:
             raise ValueError(f"Empty sampled {component} signal")
@@ -176,78 +145,68 @@ def main(argv=None):
     console.print(table)
     console.print(
         "[dim]* Singular values >0.1% of largest; diagnostic, not a filter cutoff.[/dim]\n"
-        f"[bold]OPW: {median(v['total_ms'] for v in timings):.2f} ms[/bold] median of {args.repeat} warmed trials "
+        f"[bold]OPW: {median(v['total_ms'] for v in timings):.2f} ms[/bold] median of {repeat} warmed trials "
         "(host channels to host PD).\n"
         "Validation passed. Simulation, sampled-IQ diagnostics and checks excluded from timing."
     )
-    if filtered:
-        from .clutter_pipeline import component_retention
+    from .clutter_pipeline import component_retention
 
-        comparisons = Table(title=f"GPU filters: retain ranks [{args.rank_start}, {args.rank_stop})")
-        for label in ("Pipeline", "Total ms", "Filter ms", "PD err", "Tissue left", "Blood kept"):
-            comparisons.add_column(label, justify="left" if label == "Pipeline" else "right")
-        for key, record in filtered.items():
-            domain, variant = key.split("/")
-            label = "Image" if domain == "beamformed" else "Channel"
-            name = f"{label} {variant.upper().replace('GRAM', 'EVD')}"
-            if "skipped" in record or "failed" in record:
-                comparisons.add_row(name, "skipped" if "skipped" in record else "failed", "-", "-", "-", "-")
-                continue
-            record["component_retention"] = component_retention(record, sampled, args.rank_start, args.rank_stop)
-            quality = record["component_retention"]
-            trials = record["trials"]
-            comparisons.add_row(
-                name,
-                f"{median(t['total_ms'] for t in trials):.2f}",
-                f"{median(t['stages_ms']['clutter_ms'] for t in trials):.2f}",
-                f"{record['pd_error_vs_svd128']['relative_l2'] * 100:.3g}%"
-                if "pd_error_vs_svd128" in record
-                else "N/A",
-                f"{quality['tissue_power_fraction']:.3%}",
-                f"{quality['blood_power_fraction']:.2%}",
-            )
-        console.print(comparisons)
-        console.print(
-            "PD err: relative L2 vs full SVD128. Tissue left/blood kept: sampled component power.\n"
-            "Includes allocation, transfers, filtering, OPW and PD; checks/diagnostics excluded."
+    comparisons = Table(title=f"GPU filters: retain ranks [{rank_start}, {rank_stop})")
+    for label in ("Pipeline", "Total ms", "Filter ms", "PD err", "Tissue left", "Blood kept"):
+        comparisons.add_column(label, justify="left" if label == "Pipeline" else "right")
+    for key, record in filtered.items():
+        domain, variant = key.split("/")
+        label = "Image" if domain == "beamformed" else "Channel"
+        name = f"{label} {variant.upper().replace('GRAM', 'EVD')}"
+        if "skipped" in record or "failed" in record:
+            comparisons.add_row(name, "skipped" if "skipped" in record else "failed", "-", "-", "-", "-")
+            continue
+        record["component_retention"] = component_retention(record, sampled, rank_start, rank_stop)
+        quality = record["component_retention"]
+        trials = record["trials"]
+        comparisons.add_row(
+            name,
+            f"{median(t['total_ms'] for t in trials):.2f}",
+            f"{median(t['stages_ms']['clutter_ms'] for t in trials):.2f}",
+            f"{record['pd_error_vs_svd128']['relative_l2'] * 100:.3g}%" if "pd_error_vs_svd128" in record else "N/A",
+            f"{quality['tissue_power_fraction']:.3%}",
+            f"{quality['blood_power_fraction']:.2%}",
         )
-        for key, record in filtered.items():
-            if "failed" in record or "skipped" in record:
-                console.print(f"{key}: {record.get('failed', record.get('skipped'))}", markup=False)
-            elif record.get("precision_warning"):
-                console.print(f"Warning: {key} differs from SVD128 by >0.5%; inspect precision before use.")
-        negatives = [
-            f"{key}: {record['gram_diagnostics']['negative_eigenvalues']}"
-            for key, record in filtered.items()
-            if record.get("gram_diagnostics", {}).get("negative_eigenvalues", 0)
-        ]
-        if negatives:
-            console.print("Roundoff-negative Gram eigenvalues clipped (not overflow): " + ", ".join(negatives))
+    console.print(comparisons)
+    console.print(
+        "PD err: relative L2 vs full SVD128. Tissue left/blood kept: sampled component power.\n"
+        "Includes allocation, transfers, filtering, OPW and PD; checks/diagnostics excluded."
+    )
+    for key, record in filtered.items():
+        if "failed" in record or "skipped" in record:
+            console.print(f"{key}: {record.get('failed', record.get('skipped'))}", markup=False)
+        elif record.get("precision_warning"):
+            console.print(f"Warning: {key} differs from SVD128 by >0.5%; inspect precision before use.")
+    negatives = [
+        f"{key}: {record['gram_diagnostics']['negative_eigenvalues']}"
+        for key, record in filtered.items()
+        if record.get("gram_diagnostics", {}).get("negative_eigenvalues", 0)
+    ]
+    if negatives:
+        console.print("Roundoff-negative Gram eigenvalues clipped (not overflow): " + ", ".join(negatives))
     report = {
-        "stage": "gpu_filtered_baselines" if filtered else "scene_only_unfiltered",
-        "rank_start": args.rank_start,
-        "rank_stop": args.rank_stop,
+        "stage": "gpu_filtered_baselines",
+        "rank_start": rank_start,
+        "rank_stop": rank_stop,
         "filtered": filtered,
         "shape": [len(axis) for axis in scene.grid],
-        "channel_shape": [368, args.elements, args.angles, args.frames],
+        "channel_shape": [368, elements, angles, frames],
         "pci_bus_id": bus,
         "noise_std_per_quadrature": scene.noise_std,
         "blood_ar1_correlation": scene.blood_correlation,
         "tissue_source_amplitude": scene.tissue_amplitude,
         "sampled_shape": list(mixture.shape),
         "seed": scene.seed,
-        "frames": args.frames,
+        "frames": frames,
         "prf_hz": scene.prf_hz,
         "component_additivity_relative_error": relative_error,
         "diagnostics": diagnostics,
         "timings": timings,
         "telemetry_clock_mhz_power_w_temperature_c_utilization_percent": telemetry,
     }
-    if args.output is not None:
-        args.output.write_text(json.dumps(report, indent=2) + "\n")
-        console.print(f"Details saved to {args.output}", markup=False)
     return report
-
-
-if __name__ == "__main__":
-    main()

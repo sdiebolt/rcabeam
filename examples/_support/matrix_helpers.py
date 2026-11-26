@@ -17,8 +17,11 @@ def _matrix_positions(n_side: int, pitch: float) -> np.ndarray:
 
 def _scan_grid(x: np.ndarray, z: np.ndarray, y: np.ndarray) -> np.ndarray:
     """Return flattened `(x, y, z)` scan coordinates for mach."""
-    xx, zz, yy = np.meshgrid(x, z, y, indexing="ij")
-    return np.stack([xx.ravel(), yy.ravel(), zz.ravel()], axis=-1).astype(np.float32)
+    scan = np.empty((len(x), len(z), len(y), 3), dtype=np.float32)
+    scan[..., 0] = x[:, None, None]
+    scan[..., 1] = y
+    scan[..., 2] = z[:, None]
+    return scan.reshape(-1, 3)
 
 
 def _plane_direction(angle_x: float, angle_y: float) -> tuple[float, float, float]:
@@ -60,9 +63,8 @@ def _simulate_matrix_iq(
         tx = (xp * sx + yp * sy + zp * sz) / c + tx_offset_s
         dist = np.sqrt((xp - rx_coords[:, 0]) ** 2 + (yp - rx_coords[:, 1]) ** 2 + zp**2)
         tau = tx + dist / c
-        dt = t[None, :] - tau[:, None]
         envelope = (
-            np.exp(-((dt / sigma_t) ** 2))
+            np.exp(-(((t - tau[:, None]) / sigma_t) ** 2))
             if bandwidth_hz is None
             else sample_bandlimited_pulse(tau, nsamp, t_start, fs, bandwidth_hz).T
         )

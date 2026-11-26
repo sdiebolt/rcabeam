@@ -9,8 +9,8 @@ from rcabeam.sim import _delay_numpy
 
 @pytest.mark.cuda_extension
 def test_affine_iq_on_depth_knots():
-    pytest.importorskip("cupy")
-    from examples._support.dmas_delay_benchmark import cuda_module, one_plane, prepare_hybrid, tables
+    cp = pytest.importorskip("cupy")
+    from examples._support.dmas_delay import cuda_module, prepare_hybrid
     from examples._support.rca_visualization import _hybrid
 
     # Distinct apertures and frame-dependent complex values expose transpositions,
@@ -37,11 +37,11 @@ def test_affine_iq_on_depth_knots():
     mod = cuda_module()
     reconstruct = prepare_hybrid(raw[0].shape, grid, geom, angles, 0.75, 3, mod, True)
     for result in (
-        tables(raw, grid, geom, angles, 0.75, mod),
-        one_plane(raw, grid, geom, angles, mod),
-        reconstruct(raw),
+        cp.asnumpy(reconstruct(raw)),
         _hybrid(raw, angles, grid, geom),  # 32 frames plus a three-frame tail
     ):
         np.testing.assert_allclose(result, expected, rtol=3e-4, atol=2e-6 * expected.max())
     # DMAS scales linearly with a common positive channel gain.
-    np.testing.assert_allclose(reconstruct([2 * v for v in raw]), 2 * expected, rtol=3e-4, atol=4e-6 * expected.max())
+    np.testing.assert_allclose(
+        cp.asnumpy(reconstruct([2 * v for v in raw])), 2 * expected, rtol=3e-4, atol=4e-6 * expected.max()
+    )

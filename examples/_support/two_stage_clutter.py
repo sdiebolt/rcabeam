@@ -5,10 +5,7 @@ Timings include fresh basis estimation, filtering, allocation, raw H2D and PD
 D2H for each pipeline. Image-domain basis changes are deliberately excluded.
 """
 
-import argparse
-import json
 import os
-from pathlib import Path
 from statistics import median
 
 import cupy as cp
@@ -16,7 +13,6 @@ import numpy as np
 from rich.console import Console
 from rich.table import Table
 
-from rcabeam.clutter import _rank_interval
 from rcabeam.gpu import OpwWorkspace
 from rcabeam.gpu_clutter import _mean_power, apply_temporal_filter, temporal_basis
 from rcabeam.two_stage import TwoStageOpwWorkspace
@@ -26,7 +22,6 @@ from .clutter_pipeline import filtered_opw
 from .clutter_scene import clutter_scene
 from .gpu_monitor import monitor_gpu
 from .scene import TARGETS
-from .two_stage_benchmark import _width
 
 
 def _key(density):
@@ -69,6 +64,22 @@ def _iq_error_energy(actual, reference):
         delta = a[first : first + 16384].astype(cp.complex128) - b[first : first + 16384].astype(cp.complex128)
         error += float(cp.sum(_mean_power(delta, axis=-1), dtype=cp.float64).item()) * frames
     return error
+
+
+def _width(axis, amplitude, fraction):
+    """Interpolated width of the connected main lobe; None if the trace clips it."""
+    peak = int(np.argmax(amplitude))
+    level = amplitude[peak] * fraction
+    left = right = peak
+    while left > 0 and amplitude[left] >= level:
+        left -= 1
+    while right < len(axis) - 1 and amplitude[right] >= level:
+        right += 1
+    if amplitude[left] >= level or amplitude[right] >= level:
+        return None
+    lo = np.interp(level, amplitude[left : left + 2], axis[left : left + 2])
+    hi = np.interp(level, amplitude[right - 1 : right + 1][::-1], axis[right - 1 : right + 1][::-1])
+    return float(hi - lo)
 
 
 def _profiles(actual, reference, grid):
@@ -248,48 +259,23 @@ def compare(raw, scene, densities, *, rank_start, rank_stop, frame_chunk, repeat
     }
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    for name, default in (
-        ("grid", 80),
-        ("elements", 80),
-        ("angles", 16),
-        ("frames", 200),
-        ("repeat", 3),
-        ("frame-chunk", 32),
-    ):
-        parser.add_argument(f"--{name}", type=int, default=default)
-    parser.add_argument("--rank-start", type=int, required=True)
-    parser.add_argument("--rank-stop", type=int)
-    parser.add_argument("--density", type=float, nargs="+", default=[8, 16, 32])
-    parser.add_argument("--output", type=Path)
-    args = parser.parse_args(argv)
-    if min(args.grid, args.elements, args.angles, args.repeat, args.frame_chunk) < 1 or args.frames < 2:
-        parser.error("Positive dimensions/repeats/chunk and at least two frames required")
-    if any(not np.isfinite(d) or d < 2 for d in args.density) or len(set(args.density)) != len(args.density):
-        parser.error("Densities must be unique, finite and >=2")
-    try:
-        args.rank_start, args.rank_stop = _rank_interval(args.frames, args.rank_start, args.rank_stop)
-    except ValueError as error:
-        parser.error(str(error))
+def run(*, grid, elements, angles, frames, repeat, rank_start, rank_stop, density, frame_chunk):
     bus = cp.cuda.Device().pci_bus_id
     console = Console()
-    console.print(
-        f"Channel EVD64 + OPW / two-stage | {args.frames} frames | retain [{args.rank_start}, {args.rank_stop})"
-    )
+    console.print(f"Channel EVD64 + OPW / two-stage | {frames} frames | retain [{rank_start}, {rank_stop})")
     console.print("Synthetic fixed-position tissue/blood/noise; two-stage is approximate, not validated acquired flow.")
     with monitor_gpu(bus):
-        scene = clutter_scene(args.grid, args.elements, args.angles, args.frames)
+        scene = clutter_scene(grid, elements, angles, frames)
         raw = scene.channels()
     with console.status("Checking shared filtered channels, warming and comparing full pipelines..."):
         results = compare(
             raw,
             scene,
-            args.density,
-            rank_start=args.rank_start,
-            rank_stop=args.rank_stop,
-            frame_chunk=args.frame_chunk,
-            repeat=args.repeat,
+            density,
+            rank_start=rank_start,
+            rank_stop=rank_stop,
+            frame_chunk=frame_chunk,
+            repeat=repeat,
             bus=bus,
         )
     table = Table(title="Matched channel-filtered reconstruction")
@@ -328,15 +314,15 @@ def main(argv=None):
             console.print(f"{key}: {record.get('skipped', record.get('failed'))}", markup=False)
     report = {
         "stage": "two_stage_channel_clutter",
-        "rank_start": args.rank_start,
-        "rank_stop": args.rank_stop,
-        "frames": args.frames,
+        "rank_start": rank_start,
+        "rank_stop": rank_stop,
+        "frames": frames,
         "prf_hz": scene.prf_hz,
         "grid": [len(v) for v in scene.grid],
         "channel_shape": list(raw[0].shape),
         "seed": scene.seed,
-        "densities": args.density,
-        "frame_chunk": args.frame_chunk,
+        "densities": density,
+        "frame_chunk": frame_chunk,
         "pci_bus_id": bus,
         "precision": "complex64 Gram/EVD/projection; float64 PD reduction",
         "math_environment": {name: os.environ.get(name) for name in ("NVIDIA_TF32_OVERRIDE", "CUPY_TF32")},
@@ -344,11 +330,4 @@ def main(argv=None):
         "results": results,
         "quality_scope": "Full-volume IQ/PD errors; same filtered channels; conventional filtered blood is the leakage denominator",
     }
-    if args.output is not None:
-        args.output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
-        console.print(f"Details saved to {args.output}", markup=False)
     return report
-
-
-if __name__ == "__main__":
-    main()

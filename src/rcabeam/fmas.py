@@ -24,8 +24,7 @@ def signed_sqrt(x: np.ndarray) -> np.ndarray:
     arr = np.asarray(x)
     mag = np.abs(arr)
     out = np.zeros_like(arr)
-    nz = mag > 0
-    out[nz] = arr[nz] / np.sqrt(mag[nz])
+    np.divide(arr, np.sqrt(mag), out=out, where=mag > 0, casting="unsafe")
     return out
 
 

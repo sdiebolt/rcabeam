@@ -19,26 +19,35 @@ def entry(monkeypatch):
 @pytest.fixture
 def runners(entry, monkeypatch):
     calls = []
-    for name in ("rca_benchmark", "clutter_benchmark", "two_stage_clutter", "clutter_accuracy"):
+    for name in (
+        "rca_benchmark",
+        "clutter_benchmark",
+        "two_stage_clutter",
+        "clutter_accuracy",
+        "approximation_benchmark",
+    ):
 
         def run(*args, _name=name, **kwargs):
             calls.append((_name, args, kwargs))
             return {"module": _name, "args": list(args), "kwargs": kwargs}
 
-        monkeypatch.setitem(sys.modules, f"_support.{name}", SimpleNamespace(main=run))
+        monkeypatch.setitem(sys.modules, f"_support.{name}", SimpleNamespace(main=run, run=run))
     return calls
 
 
 def test_no_arguments_preserve_original_call(entry, runners):
     report = entry.main([])
-    assert runners == [("rca_benchmark", (), {})]
+    assert runners == [("rca_benchmark", (), entry.DEFAULTS)]
     assert set(report["suites"]) == {"reconstruction"}
 
 
 @pytest.mark.parametrize("suite, module", [("clutter", "clutter_benchmark"), ("pipeline", "two_stage_clutter")])
 def test_single_filter_suite(entry, runners, suite, module):
     report = entry.main(["--suite", suite, "--rank-start", "3", "--rank-stop", "100"])
-    assert runners == [(module, (["--rank-start", "3", "--rank-stop", "100"],), {})]
+    expected = dict(**entry.DEFAULTS, rank_start=3, rank_stop=100)
+    if suite == "pipeline":
+        expected.update(density=[8, 16, 32], frame_chunk=32)
+    assert runners == [(module, (), expected)]
     assert set(report["suites"]) == {suite}
 
 
@@ -71,12 +80,14 @@ def test_all_routes_shared_settings_and_writes_one_report(entry, runners, tmp_pa
             str(path),
         ]
     )
-    common = ["--grid", "3", "--elements", "4", "--angles", "2", "--frames", "7", "--repeat", "1"]
-    filtered = [*common, "--rank-start", "2", "--rank-stop", "6"]
+    common = dict(grid=3, elements=4, angles=2, frames=7, repeat=1)
+    filtered = dict(**common, rank_start=2, rank_stop=6)
     assert runners == [
-        ("rca_benchmark", (), dict(grid=3, elements=4, angles=2, frames=7, repeat=1)),
-        ("clutter_benchmark", (filtered,), {}),
-        ("two_stage_clutter", ([*filtered, "--density", "8.0", "16.0", "--frame-chunk", "3"],), {}),
+        ("rca_benchmark", (), common),
+        ("clutter_benchmark", (), filtered),
+        ("two_stage_clutter", (), dict(**filtered, density=[8, 16], frame_chunk=3)),
+        ("approximation_benchmark", (), dict(**filtered, family="st-sw")),
+        ("approximation_benchmark", (), dict(**filtered, family="dmas")),
     ]
     assert json.loads(path.read_text()) == report
     assert report["targets"]["complete_pipeline_ms"] == report["targets"]["reconstruction_only_ms"] == 400
@@ -86,8 +97,8 @@ def test_all_routes_shared_settings_and_writes_one_report(entry, runners, tmp_pa
 def test_extended_precision_is_opt_in_and_has_separate_fixture(entry, runners):
     report = entry.main(["--suite", "clutter", "--rank-start", "3", "--frames", "200", "--extended-clutter"])
     assert runners[-2:] == [
-        ("clutter_accuracy", (["--input-dtype", "complex64"],), {}),
-        ("clutter_accuracy", (["--input-dtype", "complex128"],), {}),
+        ("clutter_accuracy", (), {"input_dtype": "complex64"}),
+        ("clutter_accuracy", (), {"input_dtype": "complex128"}),
     ]
     assert set(report["suites"]["clutter_accuracy"]) == {"complex64", "complex128"}
 
@@ -132,7 +143,7 @@ def test_help_before_optional_imports(entry, monkeypatch, capsys):
 
 
 def test_strict_report_rejects_nonfinite_details(entry, runners, monkeypatch, tmp_path):
-    monkeypatch.setitem(sys.modules, "_support.rca_benchmark", SimpleNamespace(main=lambda: {"bad": float("nan")}))
+    monkeypatch.setitem(sys.modules, "_support.rca_benchmark", SimpleNamespace(main=lambda **kw: {"bad": float("nan")}))
     path = tmp_path / "report.json"
     with pytest.raises(ValueError):
         entry.main(["--output", str(path)])
@@ -146,7 +157,8 @@ def test_real_gpu_all_suites(entry, monkeypatch, tmp_path):
     clutter = importlib.import_module("_support.clutter_benchmark")
     pipeline = importlib.import_module("_support.two_stage_clutter")
     filters = importlib.import_module("_support.clutter_pipeline")
-    for module in (reconstruction, clutter, pipeline, filters):
+    approximation = importlib.import_module("_support.approximation_benchmark")
+    for module in (reconstruction, clutter, pipeline, filters, approximation):
         monkeypatch.setattr(module, "monitor_gpu", lambda bus: nullcontext([]))
     monkeypatch.setattr(reconstruction, "_matrix_reference", lambda *args: None)
     path = tmp_path / "all.json"
@@ -175,7 +187,7 @@ def test_real_gpu_all_suites(entry, monkeypatch, tmp_path):
         ]
     )
     assert json.loads(path.read_text()) == report
-    assert set(report["suites"]) == {"reconstruction", "clutter", "pipeline"}
+    assert set(report["suites"]) == set(entry.SUITES)
     reconstructed = report["suites"]["reconstruction"]
     assert reconstructed["channel_shape"] == [368, 4, 2, 7]
     assert all(len(trials) == 1 for trials in reconstructed["trials"].values())

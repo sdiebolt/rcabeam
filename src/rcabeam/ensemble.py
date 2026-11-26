@@ -86,8 +86,7 @@ def _run(
 
     scan = _scan_coords(grid)
     nv, nt = len(scan), rc.shape[-1]
-    # ponytail: reorder power-only scans; GPU output scattering is needed before
-    # extending this to IQ without a potentially expensive full host copy.
+    # Reorder only power scans to avoid scattering a full IQ ensemble on the host.
     shape = (len(grid[0]), len(grid[1]), len(grid[2]))
     order = opw_voxel_order(shape) if method == "opw" and not return_signal else None
     if order is not None:
@@ -117,6 +116,9 @@ def _run(
     )
     if timings is not None:
         timings["raw_upload_seconds"] = raw_upload_seconds
+    if return_signal:
+        signal_shape = (*shape, 2, nt) if method == "apertures" else (*shape, nt)
+        return pd[:, 0].reshape(shape), signal.reshape(signal_shape)
     power = np.empty(nv, dtype=np.float32)
     if order is None:
         power[:] = pd[:, 0]
@@ -125,8 +127,7 @@ def _run(
     if method == "st_sw":
         peak = weights.max()
         power *= weights / peak if peak > 0 else 0
-    signal_shape = (*shape, 2, nt) if method == "apertures" else (*shape, nt)
-    return power.reshape(shape), signal.reshape(signal_shape) if return_signal else signal
+    return power.reshape(shape), signal
 
 
 def ensemble_pd_from_channels(

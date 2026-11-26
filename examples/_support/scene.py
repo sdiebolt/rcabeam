@@ -1,5 +1,6 @@
 """Shared five-target acquisition and reconstruction helpers for the examples."""
 
+from functools import cache
 from time import perf_counter
 from typing import Literal
 
@@ -75,11 +76,12 @@ def two_stage_power(raw, angles, grid, geom, timings=None):
     return mean_iq_power(workspace.reconstruct(*gpu))
 
 
-def mean_iq_power(iq):
-    """Reduce complex slow-time samples on the device and return host power."""
+@cache
+def power_kernel():
+    """CuPy reduction shared by RCA and matrix reconstruction examples."""
     import cupy as cp
 
-    mean_power = cp.ReductionKernel(
+    return cp.ReductionKernel(
         "complex64 x",
         "float32 y",
         "x.real()*x.real()+x.imag()*x.imag()",
@@ -88,7 +90,13 @@ def mean_iq_power(iq):
         "0",
         "benchmark_mean_power",
     )
-    return cp.asnumpy(mean_power(iq, axis=-1))
+
+
+def mean_iq_power(iq):
+    """Download a power volume after reducing frames on the GPU."""
+    import cupy as cp
+
+    return cp.asnumpy(power_kernel()(iq, axis=-1))
 
 
 def native_maps(raw, grid, geom, angles, method):

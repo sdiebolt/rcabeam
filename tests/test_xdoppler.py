@@ -37,5 +37,8 @@ def test_boolean_and_negative_angle_selectors():
 
     iq = np.array([[2], [7]], np.complex64)
     for method in (xdoppler_pd, rc_fmas_pd):
-        expected = method(iq, np.array([1]), np.array([0]), use_cuda=False)
-        np.testing.assert_allclose(method(iq, np.array([False, True]), np.array([-2])), expected)
+        for use_cuda in (False, True):
+            expected = method(iq, np.array([1]), np.array([0]), use_cuda=use_cuda)
+            actual = method(iq, np.array([False, True]), np.array([-2]), use_cuda=use_cuda)
+            np.testing.assert_array_equal(actual, expected)
+            np.testing.assert_allclose(actual, 14, rtol=1e-6)

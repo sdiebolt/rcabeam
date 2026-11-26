@@ -1,9 +1,6 @@
 """Small IQ-filter accuracy sweep, not an OPW timing or physiological benchmark."""
 
-import argparse
-import json
 import os
-from pathlib import Path
 
 import numpy as np
 from rich.console import Console
@@ -183,39 +180,29 @@ def evaluate(parts, *, input_dtype, metadata):
     return results
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(
-        description=__doc__,
-        epilog="Fixed synthetic bands: [3,T), [3,T//2), [3,8). Three tissue/five blood factors are test choices, not clinical cutoffs.",
-    )
-    parser.add_argument("--rows", type=int, default=256)
-    parser.add_argument("--frames", type=int, default=32)
-    parser.add_argument("--seeds", type=int, default=3, help="Seeds 42 .. 42+N-1; errors are maxima, not averages")
-    parser.add_argument("--input-dtype", choices=("complex64", "complex128"), default="complex128")
-    parser.add_argument("--output", type=Path)
-    args = parser.parse_args(argv)
-    if args.frames < 16 or args.rows < args.frames or args.seeds < 1:
-        parser.error("Require rows >= frames >= 16 and seeds >= 1")
+def run(*, input_dtype, rows=256, frames=32, seeds=3):
+    if frames < 16 or rows < frames or seeds < 1 or input_dtype not in ("complex64", "complex128"):
+        raise ValueError("Require complex input, rows >= frames >= 16 and seeds >= 1")
     import cupy as cp
     from cupy._core import _routines_linalg
     from cupy_backends.cuda.libs import cublas
 
     console = Console()
-    console.print(f"Clutter accuracy | {args.rows} x {args.frames} | input {args.input_dtype} | {args.seeds} seeds")
+    console.print(f"Clutter accuracy | {rows} x {frames} | input {input_dtype} | {seeds} seeds")
     console.print(
         "Algebraic IQ fixtures, not acquired data or an OPW timing benchmark. No automatic acceptance threshold.\n"
         "Fixed synthetic bands: [3,T), [3,T//2), [3,8); duplicates omitted."
     )
     records = []
-    for seed in range(42, 42 + args.seeds):
+    for seed in range(42, 42 + seeds):
         for ratio in RATIOS:
             for gap in (*GAPS, None):
                 family = "gap" if gap is not None else "overlap"
-                parts = components(args.rows, args.frames, seed, ratio, gap)
+                parts = components(rows, frames, seed, ratio, gap)
                 records.extend(
                     evaluate(
                         parts,
-                        input_dtype=args.input_dtype,
+                        input_dtype=input_dtype,
                         metadata={
                             "family": family,
                             "seed": seed,
@@ -279,10 +266,10 @@ def main(argv=None):
     props = cp.cuda.runtime.getDeviceProperties(cp.cuda.Device().id)
     report = {
         "stage": "clutter_accuracy_envelope",
-        "rows": args.rows,
-        "frames": args.frames,
-        "input_dtype": args.input_dtype,
-        "seeds": list(range(42, 42 + args.seeds)),
+        "rows": rows,
+        "frames": frames,
+        "input_dtype": input_dtype,
+        "seeds": list(range(42, 42 + seeds)),
         "fixture_prf_hz": 500.0,
         "fixture_factor_ranks": {"tissue": 3, "blood": 5},
         "limits": "Small algebraic matrices, not physiological validation or a guarantee for million-row covariance accumulation",
@@ -302,11 +289,4 @@ def main(argv=None):
         "math_environment": {name: os.environ.get(name) for name in ("CUPY_TF32", "NVIDIA_TF32_OVERRIDE")},
         "cases": records,
     }
-    if args.output is not None:
-        args.output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
-        console.print(f"Details saved to {args.output}", markup=False)
     return report
-
-
-if __name__ == "__main__":
-    main()

@@ -101,9 +101,9 @@ def test_smaller_projector_and_power_without_full_output(monkeypatch, start, sto
     observed = []
     original = gpu_clutter._filtered_block
 
-    def spy(block, vectors, subtract):
+    def spy(block, vectors, adjoint, subtract):
         observed.append(vectors.shape[1])
-        return original(block, vectors, subtract)
+        return original(block, vectors, adjoint, subtract)
 
     monkeypatch.setattr(gpu_clutter, "_filtered_block", spy)
     expected = np.zeros_like(host)

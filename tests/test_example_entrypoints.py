@@ -18,7 +18,7 @@ def examples(monkeypatch):
 def test_benchmark_runs_all_methods_without_arguments(examples, monkeypatch):
     entry = importlib.import_module("benchmark")
     calls = []
-    monkeypatch.setitem(sys.modules, "_support.rca_benchmark", SimpleNamespace(main=lambda: calls.append(1)))
+    monkeypatch.setitem(sys.modules, "_support.rca_benchmark", SimpleNamespace(main=lambda **kw: calls.append(1)))
     entry.main([])
     assert calls == [1]
 

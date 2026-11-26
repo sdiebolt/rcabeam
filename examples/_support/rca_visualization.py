@@ -3,8 +3,10 @@
 import numpy as np
 from rich.console import Console
 
-from rcabeam.two_stage import TwoStageOpwWorkspace, TwoStageStswWorkspace
+from rcabeam.two_stage import TwoStageOpwWorkspace
 
+from .approximation import hybrid_dmas as _hybrid
+from .approximation import stsw_maps as _stsw
 from .clutter_scene import clutter_scene
 from .scene import TARGETS, check_volume, ensemble_scene, mean_iq_power, native_maps
 from .viewer import show_volumes
@@ -78,34 +80,6 @@ def _plane_power(raw, angles, grid, geom, planes):
         baseband=bool(planes),
     )
     return mean_iq_power(ws.reconstruct(*raw))
-
-
-def _stsw(raw, angles, grid, geom, planes):
-    import cupy as cp
-
-    if planes == 0:
-        return native_maps(raw, grid, geom, angles, "st_sw")
-    ws = TwoStageStswWorkspace(raw[0].shape, angles, 2e-6, grid, geom, n_planes=planes)
-    weight, power = ws.reconstruct(*raw)
-    return cp.asnumpy(power), cp.asnumpy(weight)
-
-
-def _hybrid(raw, angles, grid, geom):
-    from .dmas_delay_benchmark import cuda_module, prepare_hybrid
-
-    # The DMAS output is a mean over independent frame responses. Bound the
-    # delay-table workspace by averaging batches after full-ensemble filtering.
-    frames = raw[0].shape[-1]
-    total = np.zeros(tuple(map(len, grid)), np.float64)
-    mod = cuda_module()
-    previous_count = 0
-    for start in range(0, frames, 32):
-        count = min(32, frames - start)
-        if count != previous_count:
-            reconstruct = prepare_hybrid((*raw[0].shape[:-1], count), grid, geom, angles, 0.5, 16, mod, cubic=True)
-            previous_count = count
-        total += count * reconstruct(tuple(v[..., start : start + count] for v in raw))
-    return (total / frames).astype(np.float32)
 
 
 def _volumes(raw, angles, grid, geom, scene, view):

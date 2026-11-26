@@ -34,7 +34,7 @@ def st_sw_weights(
     nx, nz, ny = arr.shape[:3]
     rc_idx = np.asarray(rc_idx)
     cr_idx = np.asarray(cr_idx)
-    weights = np.zeros((nx, nz, ny), dtype=np.complex128)
+    weights = np.zeros((nx, nz, ny), dtype=np.float64)
     for z0 in range(0, nz, z_chunk):
         sl = slice(z0, min(z0 + z_chunk, nz))
         rc = arr[:, sl][..., rc_idx, :]
@@ -51,6 +51,7 @@ def st_sw_weights(
             v_cr.append(np.mean(np.abs(group - mu[..., None, :]) ** 2, axis=-2))
 
         ccf = {}
+        energy = {}
         for ir in range(k):
             for ic in range(k):
                 num = m_rc[ir] * np.conj(m_cr[ic])
@@ -59,24 +60,24 @@ def st_sw_weights(
                     value = num / den
                 value[~np.isfinite(value)] = 0
                 ccf[ir, ic] = value
+                energy[ir, ic] = np.sum(np.abs(value) ** 2, axis=-1)
 
         acc = np.zeros(rc.shape[:3], dtype=np.complex128)
         for ir1 in range(k):
             for ic1 in range(k):
                 c1 = ccf[ir1, ic1]
-                e1 = np.sum(np.abs(c1) ** 2, axis=-1)
+                e1 = energy[ir1, ic1]
                 for ir2 in range(ir1 + 1, k):
                     for ic2 in range(k):
                         if ic2 == ic1:
                             continue
                         c2 = ccf[ir2, ic2]
-                        den = np.sqrt(e1 * np.sum(np.abs(c2) ** 2, axis=-1))
+                        den = np.sqrt(e1 * energy[ir2, ic2])
                         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
                             corr = np.sum(c1 * np.conj(c2), axis=-1) / den
                         corr[~np.isfinite(corr)] = 0
                         acc += corr
-        weights[:, sl] = acc
-    weights = np.abs(weights)
+        weights[:, sl] = np.abs(acc)
     peak = weights.max()
     return weights / peak if peak > 0 else weights
 
