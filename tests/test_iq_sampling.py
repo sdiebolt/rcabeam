@@ -51,3 +51,17 @@ def test_closed_receive_window(use_cuda):
     raw = np.arange(1, 4, dtype=np.complex64).reshape(3, 1, 1)
     _, angles, _ = delay_rca_channel_data(raw, zero, 0, grid, geom, "RC", use_cuda=use_cuda)
     np.testing.assert_array_equal(angles.ravel(), [1, 2.5, 3, 0])
+
+
+def test_delay_tiles_preserve_grid_order(monkeypatch):
+    from rcabeam import sim
+
+    el = np.array([-0.25, 0.5])
+    geom = sim.RCAGeometry(el, el, c=2, fs=1, f_demod=0.25)
+    grid = (el, np.array([0.5, 1.5, 2.5]), -el)
+    raw = np.arange(20, dtype=np.complex64).reshape(5, 2, 2)
+    args = (raw, el, 0, grid, geom, "CR")
+    expected = sim.delay_rca_channel_data(*args, use_cuda=False)
+    monkeypatch.setattr(sim, "_DELAY_BLOCK_PAIRS", 10)
+    for got, ref in zip(sim.delay_rca_channel_data(*args, use_cuda=False), expected, strict=True):
+        np.testing.assert_array_equal(got, ref)

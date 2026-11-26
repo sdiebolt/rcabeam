@@ -239,10 +239,11 @@ def delay_rca_channels(
             arr = np.ascontiguousarray(iq_ch, dtype=np.complex64)
             starts = np.ascontiguousarray(np.broadcast_to(np.asarray(t_start, dtype=np.float32), (len(angles),)))
             elements = geom.x_el if config == "RC" else geom.y_el
-            out = np.empty((_scan_coords(grid).shape[0], len(angles)), dtype=np.complex64)
+            scan = _scan_coords(grid)
+            out = np.empty((len(scan), len(angles)), dtype=np.complex64)
             cuda_delay_rca_channels(
                 arr,
-                _scan_coords(grid),
+                scan,
                 np.ascontiguousarray(elements, dtype=np.float32),
                 np.ascontiguousarray(angles, dtype=np.float32),
                 starts,
@@ -255,37 +256,8 @@ def delay_rca_channels(
             )
             return out.reshape((len(x), len(z), len(y), len(angles)))
 
-    xg, zg, yg = [v.ravel() for v in np.meshgrid(x, z, y, indexing="ij")]
-    if config == "RC":
-        u_tx, v_rx, el = yg, xg, np.asarray(geom.x_el)
-    elif config == "CR":
-        u_tx, v_rx, el = xg, yg, np.asarray(geom.y_el)
-    else:
-        raise ValueError("config must be 'RC' or 'CR'")
-
-    nsamp, nch, n_angles = iq_ch.shape
-    starts = np.broadcast_to(np.asarray(t_start, dtype=float), (n_angles,))
-    out = np.zeros((xg.size, n_angles), dtype=np.complex64)
-    zc = zg[:, None]
-    dv = v_rx[:, None] - el[None, :]
-    tau_rx = np.sqrt(zc**2 + dv**2) / geom.c
-    apod = np.ones_like(tau_rx, dtype=np.float32)
-    if geom.fnumber is not None:
-        apod = (np.abs(dv) <= zc / (2 * geom.fnumber)).astype(np.float32)
-
-    channels = np.arange(nch)[None, :]
-    for m, theta in enumerate(angles):
-        tau_tx = (zg * np.cos(theta) + u_tx * np.sin(theta)) / geom.c
-        tau = tau_tx[:, None] + tau_rx
-        idx = (tau - starts[m]) * geom.fs
-        i0 = np.floor(idx).astype(np.int64)
-        w = (idx - i0).astype(np.float32)
-        valid = (idx >= 0) & (idx <= nsamp - 1)
-        i0c = np.clip(i0, 0, nsamp - 1)
-        val = (1 - w) * iq_ch[i0c, channels, m] + w * iq_ch[np.minimum(i0c + 1, nsamp - 1), channels, m]
-        val *= np.exp(2j * np.pi * geom.f_demod * tau) * (apod * valid)
-        out[:, m] = val.sum(axis=1)
-    return out.reshape((len(x), len(z), len(y), n_angles))
+    _, angles_out, _ = _delay_numpy(iq_ch, angles, t_start, grid, geom, config, channels_out=False)
+    return angles_out
 
 
 def delay_rca_channel_data(
@@ -357,37 +329,54 @@ def delay_rca_channel_data(
             shape = (len(x), len(z), len(y))
             return channel_sum.reshape((*shape, nch)), angle_sum.reshape((*shape, n_angles)), n_active.reshape(shape)
 
-    xg, zg, yg = [v.ravel() for v in np.meshgrid(x, z, y, indexing="ij")]
-    if config == "RC":
-        u_tx, v_rx, el = yg, xg, np.asarray(geom.x_el)
-    elif config == "CR":
-        u_tx, v_rx, el = xg, yg, np.asarray(geom.y_el)
-    else:
+    return _delay_numpy(iq_ch, angles, t_start, grid, geom, config, channels_out=True)
+
+
+# Maximum voxel/channel pairs per temporary, independent of image dimensions.
+_DELAY_BLOCK_PAIRS = 65536
+
+
+def _delay_numpy(iq, angles, t_start, grid, geom, config, *, channels_out):
+    if config not in ("RC", "CR"):
         raise ValueError("config must be 'RC' or 'CR'")
-
-    nsamp, nch, n_angles = iq_ch.shape
-    starts = np.broadcast_to(np.asarray(t_start, dtype=float), (n_angles,))
-    channel_sum = np.zeros((xg.size, nch), dtype=np.complex64)
-    angle_sum = np.zeros((xg.size, n_angles), dtype=np.complex64)
-    zc = zg[:, None]
-    dv = v_rx[:, None] - el[None, :]
-    tau_rx = np.sqrt(zc**2 + dv**2) / geom.c
-    apod = np.ones_like(tau_rx, dtype=np.float32)
-    if geom.fnumber is not None:
-        apod = (np.abs(dv) <= zc / (2 * geom.fnumber)).astype(np.float32)
-
-    channels = np.arange(nch)[None, :]
-    for m, theta in enumerate(angles):
-        tau_tx = (zg * np.cos(theta) + u_tx * np.sin(theta)) / geom.c
-        tau = tau_tx[:, None] + tau_rx
-        idx = (tau - starts[m]) * geom.fs
-        i0 = np.floor(idx).astype(np.int64)
-        w = (idx - i0).astype(np.float32)
-        valid = (idx >= 0) & (idx <= nsamp - 1)
-        i0c = np.clip(i0, 0, nsamp - 1)
-        val = (1 - w) * iq_ch[i0c, channels, m] + w * iq_ch[np.minimum(i0c + 1, nsamp - 1), channels, m]
-        val *= np.exp(2j * np.pi * geom.f_demod * tau) * (apod * valid)
-        channel_sum += val
-        angle_sum[:, m] = val.sum(axis=1)
+    x, z, y = map(np.asarray, grid)
     shape = (len(x), len(z), len(y))
-    return channel_sum.reshape((*shape, nch)), angle_sum.reshape((*shape, n_angles)), apod.sum(axis=1).reshape(shape)
+    ns, nc, na = iq.shape
+    elements = np.asarray(geom.x_el if config == "RC" else geom.y_el)
+    if ns < 2 or nc < 1 or len(elements) != nc or len(angles) != na:
+        raise ValueError("Expected at least two samples and matching channel/angle dimensions")
+    starts = np.broadcast_to(t_start, (na,))
+    channels = np.arange(nc)
+    voxels = int(np.prod(shape))
+    per_angle = np.empty((voxels, na), np.complex64)
+    per_channel = np.zeros((voxels, nc), np.complex64) if channels_out else None
+    counts = np.empty(voxels, np.float32) if channels_out else None
+    block_size = max(1, _DELAY_BLOCK_PAIRS // nc)
+    for first in range(0, voxels, block_size):
+        block = slice(first, min(first + block_size, voxels))
+        ix, iz, iy = np.unravel_index(np.arange(first, block.stop), shape)
+        depth = z[iz, None]
+        tx, rx = (y[iy], x[ix]) if config == "RC" else (x[ix], y[iy])
+        distance = rx[:, None] - elements
+        receive = np.sqrt(depth**2 + distance**2) / geom.c
+        active = True if geom.fnumber is None else np.abs(distance) <= depth / (2 * geom.fnumber)
+        if counts is not None:
+            counts[block] = nc if geom.fnumber is None else np.sum(active, axis=1)
+        for m, theta in enumerate(angles):
+            transmit = (depth[:, 0] * np.cos(theta) + tx * np.sin(theta)) / geom.c
+            tau = transmit[:, None] + receive
+            sample = (tau - starts[m]) * geom.fs
+            valid = (sample >= 0) & (sample <= ns - 1)
+            sample = np.clip(sample, 0, ns - 1)
+            lower = sample.astype(np.intp)
+            w = (sample - lower).astype(np.float32)
+            delayed = (1 - w) * iq[lower, channels, m] + w * iq[np.minimum(lower + 1, ns - 1), channels, m]
+            delayed *= np.exp(2j * np.pi * geom.f_demod * tau) * (active & valid)
+            per_angle[block, m] = delayed.sum(axis=1)
+            if per_channel is not None:
+                per_channel[block] += delayed
+    return (
+        per_channel.reshape((*shape, nc)) if per_channel is not None else None,
+        per_angle.reshape((*shape, na)),
+        counts.reshape(shape) if counts is not None else None,
+    )
