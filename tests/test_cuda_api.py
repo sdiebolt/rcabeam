@@ -1,6 +1,7 @@
 """CUDA binding parity tests against Python reference implementations."""
 
 import numpy as np
+import pytest
 
 from rcabeam import (
     RCAGeometry,
@@ -18,6 +19,8 @@ from rcabeam import (
     xdoppler_pd_from_channels,
 )
 from rcabeam.fmas import rc_fmas
+
+pytestmark = pytest.mark.cuda_extension
 
 
 def test_xdoppler_cuda_matches_python() -> None:

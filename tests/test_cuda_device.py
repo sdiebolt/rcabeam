@@ -5,6 +5,8 @@ import pytest
 
 from rcabeam import RCAGeometry, ensemble_pd_from_channels
 
+pytestmark = pytest.mark.cuda_extension
+
 
 def test_borrowed_cuda_buffers() -> None:
     """Device inputs/outputs and empty optional arrays match the NumPy API."""

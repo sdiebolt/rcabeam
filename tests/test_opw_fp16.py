@@ -5,6 +5,8 @@ import pytest
 
 from rcabeam import RCAGeometry, beamform_ensemble, ensemble_pd_from_channels
 
+pytestmark = pytest.mark.cuda_extension
+
 
 @pytest.mark.parametrize("frames", [1, 3, 8, 66, 200])
 def test_half_storage_matches_quantized_fp32(frames: int) -> None:

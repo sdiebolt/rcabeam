@@ -46,3 +46,6 @@ exclude = [".venv"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "RUF"]
 ignore = ["E501"]
+
+[tool.pytest.ini_options]
+markers = ["cuda_extension: executes kernels in the compiled rcabeam CUDA module"]

@@ -17,6 +17,11 @@ uv sync --group dev
 uv run pytest -q
 ```
 
+GPU parity tests carry the `cuda_extension` marker and skip when the extension is absent.
+The manual CUDA test workflow runs the suite on a Linux x64 runner labeled `cuda`
+with an NVIDIA GPU, CUDA 13 toolkit, and uv installed. It requires both the
+compiled extension and a visible device before running pytest.
+
 The all-method benchmark and viewer need CuPy (CUDA 13):
 `uv sync --extra gpu --group dev`.
 Install the `matrix` extra instead to also include the fully populated matrix

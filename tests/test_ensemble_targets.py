@@ -8,6 +8,8 @@ from rcabeam.dmas import dmas_ccf_acf_core
 from rcabeam.sim import delay_rca_channel_data
 from rcabeam.stsw import st_sw_pd
 
+pytestmark = pytest.mark.cuda_extension
+
 
 @pytest.mark.parametrize("frequency", [6e6, 15e6])
 @pytest.mark.parametrize("angle_count", [16, 17])

@@ -13,6 +13,7 @@ from rcabeam.stsw import st_sw_pd
 from rcabeam.xdoppler import xdoppler_signal
 
 
+@pytest.mark.cuda_extension
 @pytest.mark.parametrize("frames", [1, 33, 200, 300])
 @pytest.mark.parametrize("fnumber", [None, 1.0])
 def test_batched_methods(frames: int, fnumber: float | None) -> None:

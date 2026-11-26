@@ -10,6 +10,8 @@ from rcabeam import RCAGeometry, beamform_ensemble
 cp = pytest.importorskip("cupy")
 from rcabeam.gpu import OpwWorkspace  # noqa: E402
 
+pytestmark = pytest.mark.cuda_extension
+
 
 def _reject_device_allocation(size: int) -> NoReturn:
     """Reject device allocations during warmed reconstruction.
