@@ -514,6 +514,9 @@ At broadside the round-trip carrier cycles every half wavelength. For a highest
 occupied baseband frequency B, resolving the modulated plane requires a density
 above 4(1 + B/f_demod). Planning warns using the conservative B = fs/2.
 Reference planes are centered in the lateral FoV and depth-padded for all angles.
+Depths sharing the same physical receive aperture reuse a set of planes. A change
+in active elements starts a new spline solve, so steering cannot shift the aperture
+boundary. Work and timing depend on the number of distinct depth bands.
 Frame chunks bound plane/spline scratch; final canonical IQ is retained.
 The conventional OPW APIs and defaults are unchanged.
 
@@ -553,7 +556,7 @@ is snapshotted; calls are synchronous, serialized, and require the construction
 device/default stream. Returned IQ is borrowed and overwritten on reuse.
 `two_stage_opw_numpy` supplies a small-data correctness reference.
 
-**Do not substitute this for conventional OPW yet.** The initial default run
+**Do not substitute this for conventional OPW yet.** Before the target-depth aperture correction, the initial default run
 was about **2.28× faster resident (550 vs 1253 ms)**, but whole-volume complex-IQ
 RMS error was about **21%** and off-axis lateral PSFs widened by up to **10%**.
 Increasing plane sampling did not remove that discrepancy. This approximation

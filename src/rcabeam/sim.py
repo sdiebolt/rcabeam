@@ -336,7 +336,7 @@ def delay_rca_channel_data(
 _DELAY_BLOCK_PAIRS = 65536
 
 
-def _delay_numpy(iq, angles, t_start, grid, geom, config, *, channels_out):
+def _delay_numpy(iq, angles, t_start, grid, geom, config, *, channels_out, aperture_depth=None):
     if config not in ("RC", "CR"):
         raise ValueError("config must be 'RC' or 'CR'")
     x, z, y = map(np.asarray, grid)
@@ -359,7 +359,8 @@ def _delay_numpy(iq, angles, t_start, grid, geom, config, *, channels_out):
         tx, rx = (y[iy], x[ix]) if config == "RC" else (x[ix], y[iy])
         distance = rx[:, None] - elements
         receive = np.sqrt(depth**2 + distance**2) / geom.c
-        active = True if geom.fnumber is None else np.abs(distance) <= depth / (2 * geom.fnumber)
+        aperture_z = depth if aperture_depth is None else aperture_depth
+        active = True if geom.fnumber is None else np.abs(distance) <= aperture_z / (2 * geom.fnumber)
         if counts is not None:
             counts[block] = nc if geom.fnumber is None else np.sum(active, axis=1)
         for m, theta in enumerate(angles):

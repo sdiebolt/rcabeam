@@ -7,13 +7,14 @@ approximation; acquired-data/clutter-filtered quality has not been validated.
 from __future__ import annotations
 
 import warnings
+from itertools import pairwise
 from operator import index
 from pathlib import Path
 from threading import Lock
 
 import numpy as np
 
-from rcabeam.sim import RCAGeometry, delay_rca_channels
+from rcabeam.sim import RCAGeometry, _delay_numpy
 
 
 def _plan(shape, angles, t_start, grid, geom, samples_per_wavelength):
@@ -69,6 +70,30 @@ def _plan(shape, angles, t_start, grid, geom, samples_per_wavelength):
     return shape, angles, starts, axes, elements, anchors, slopes, plane_z, constants[:4]
 
 
+def _aperture_bands(axes, elements, anchors, slopes, plane_z, fnumber):
+    """Yield output-depth slices with identical channel masks and their spline knots."""
+    x, z, y = axes
+    if fnumber <= 0:
+        yield slice(0, len(z)), plane_z
+        return
+    # All receive masks grow monotonically with aperture radius. Equal counts
+    # over both configurations therefore imply the same mask at every lateral point.
+    distances = np.sort(
+        np.concatenate([np.abs(axis[:, None] - el).ravel() for axis, el in zip((x, y), elements, strict=True)])
+    )
+    counts = np.searchsorted(distances, z / (2 * fnumber), side="right")
+    bounds = [0, *(np.flatnonzero(np.diff(counts)) + 1), len(z)]
+    shifts = np.concatenate(
+        [((axis[:, None] - anchor) * slopes).ravel() for axis, anchor in zip((x, y), anchors, strict=True)]
+    )
+    for first, end in pairwise(bounds):
+        depths = z[first:end]
+        # Include two guard knots on each side for the spline endpoint solve.
+        lo = max(0, np.searchsorted(plane_z, depths.min() + shifts.min()) - 3)
+        hi = min(len(plane_z), np.searchsorted(plane_z, depths.max() + shifts.max(), side="right") + 3)
+        yield slice(first, end), plane_z[lo:hi]
+
+
 def _spline_factors(n):
     """Thomas factors for uniform not-a-knot spline, including endpoint rows."""
     upper, inverse = np.zeros(n, np.float32), np.zeros(n, np.float32)
@@ -108,29 +133,39 @@ def two_stage_opw_numpy(rc, cr, angles, t_start, grid, geom, *, samples_per_wave
     snapshot = RCAGeometry(*elements, *constants[:3], fnumber=None if constants[3] < 0 else constants[3])
     result = np.zeros((len(x), len(z), len(y), shape[-1]), np.complex128)
     dz = np.float32(geom.c / geom.f_demod / samples_per_wavelength)
-    for config, raw, elevation, anchor in (("RC", rc, y, anchors[1]), ("CR", cr, x, anchors[0])):
-        plane_grid = (x, pz, np.array([anchor])) if config == "RC" else (np.array([anchor]), pz, y)
-        values = []
-        for frame in range(shape[-1]):
-            a = delay_rca_channels(raw[..., frame], angles, starts, plane_grid, snapshot, config, use_cuda=False)
-            values.append(a[:, :, 0] if config == "RC" else a[0].transpose(1, 0, 2))
-        planes = np.stack(values, axis=-1).astype(np.complex128)
-        second = _second_derivatives(planes)
-        for angle, slope in enumerate(slopes):
-            position = (z[:, None] + (elevation[None, :] - anchor) * slope - pz[0]) / dz
-            i = np.floor(position).astype(int)
-            w = position - i
-            a = 1 - w
-            value = (
-                a[None, ..., None] * planes[:, i, angle]
-                + w[None, ..., None] * planes[:, i + 1, angle]
-                + (
-                    (a**3 - a)[None, ..., None] * second[:, i, angle]
-                    + (w**3 - w)[None, ..., None] * second[:, i + 1, angle]
+    for band, knots in _aperture_bands(axes, elements, anchors, slopes, pz, constants[3]):
+        for config, raw, elevation, anchor in (("RC", rc, y, anchors[1]), ("CR", cr, x, anchors[0])):
+            plane_grid = (x, knots, np.array([anchor])) if config == "RC" else (np.array([anchor]), knots, y)
+            values = []
+            for frame in range(shape[-1]):
+                _, a, _ = _delay_numpy(
+                    raw[..., frame],
+                    angles,
+                    starts,
+                    plane_grid,
+                    snapshot,
+                    config,
+                    channels_out=False,
+                    aperture_depth=z[band.start],
                 )
-                / 6
-            )
-            result += value if config == "RC" else value.transpose(2, 1, 0, 3)
+                values.append(a[:, :, 0] if config == "RC" else a[0].transpose(1, 0, 2))
+            planes = np.stack(values, axis=-1).astype(np.complex128)
+            second = _second_derivatives(planes)
+            for angle, slope in enumerate(slopes):
+                position = (z[band, None] + (elevation[None, :] - anchor) * slope - knots[0]) / dz
+                i = np.floor(position).astype(int)
+                w = position - i
+                a = 1 - w
+                value = (
+                    a[None, ..., None] * planes[:, i, angle]
+                    + w[None, ..., None] * planes[:, i + 1, angle]
+                    + (
+                        (a**3 - a)[None, ..., None] * second[:, i, angle]
+                        + (w**3 - w)[None, ..., None] * second[:, i + 1, angle]
+                    )
+                    / 6
+                )
+                result[:, band] += value if config == "RC" else value.transpose(2, 1, 0, 3)
     return result.astype(np.complex64)
 
 
@@ -158,12 +193,17 @@ class TwoStageOpwWorkspace:
         self._angles, self._starts, self._slopes = [cp.asarray(v) for v in (angles, starts, slopes)]
         self._axes, self._elements = [cp.asarray(v) for v in axes], [cp.asarray(v) for v in elements]
         self._constants = tuple(np.float32(v) for v in constants)
-        self._pz0, self._dz = np.float32(pz[0]), np.float32(geom.c / geom.f_demod / samples_per_wavelength)
+        self._dz = np.float32(geom.c / geom.f_demod / samples_per_wavelength)
         self._plane_depths = pz.copy()
+        self._bands = [
+            (band, len(knots), knots[0], axes[1][band.start])
+            for band, knots in _aperture_bands(axes, elements, self._anchors, slopes, pz, constants[3])
+        ]
+        lengths = {length for _, length, _, _ in self._bands}
         na = self._shape[2]
-        self._planes = [cp.empty((len(v), len(pz), na, self._chunk), cp.complex64) for v in (axes[0], axes[2])]
+        self._planes = [cp.empty((len(v), max(lengths), na, self._chunk), cp.complex64) for v in (axes[0], axes[2])]
         self._second = [cp.empty_like(v) for v in self._planes]
-        self._upper, self._inverse = [cp.asarray(v) for v in _spline_factors(len(pz))]
+        self._factors = {n: tuple(cp.asarray(v) for v in _spline_factors(n)) for n in lengths}
         self._iq = cp.empty((*[len(v) for v in axes], self._shape[-1]), cp.complex64)
         module = cp.RawModule(code=Path(__file__).with_suffix(".cu").read_text(), options=("--std=c++17",))
         self._plane_kernel, self._spline_kernel, self._expand_kernel = [
@@ -200,59 +240,60 @@ class TwoStageOpwWorkspace:
                     raise ValueError("Inputs must be contiguous and on the workspace device")
             ns, nc, na, nt = self._shape
             nx, nz, ny = (len(v) for v in self._axes)
-            npz, chunk = len(self._plane_depths), self._chunk
+            chunk = self._chunk
 
             def ints(*values):
                 return tuple(np.int32(i) for i in values)
 
             for first in range(0, nt, chunk):
                 count = min(chunk, nt - first)
-                for config, raw in enumerate((rc, cr)):
-                    lateral = self._axes[0 if config == 0 else 2]
-                    nl = len(lateral)
-                    anchor = np.float32(self._anchors[1 - config])
-                    self._plane_kernel(
-                        ((nl * npz * na + 3) // 4, (count + 31) // 32),
+                for band, npz, plane_z0, aperture_depth in self._bands:
+                    for config, raw in enumerate((rc, cr)):
+                        lateral = self._axes[0 if config == 0 else 2]
+                        nl = len(lateral)
+                        anchor = np.float32(self._anchors[1 - config])
+                        self._plane_kernel(
+                            ((nl * npz * na + 3) // 4, (count + 31) // 32),
+                            (128,),
+                            (
+                                raw,
+                                lateral,
+                                self._elements[config],
+                                self._angles,
+                                self._starts,
+                                self._planes[config],
+                                *ints(ns, nc, na, nt, nl, npz, chunk, first, count),
+                                plane_z0,
+                                self._dz,
+                                anchor,
+                                *self._constants,
+                                aperture_depth,
+                            ),
+                        )
+                        self._spline_kernel(
+                            ((nl * na * chunk + 127) // 128,),
+                            (128,),
+                            (
+                                self._planes[config],
+                                self._second[config],
+                                *self._factors[npz],
+                                *ints(nl, npz, na, chunk, count),
+                            ),
+                        )
+                    self._expand_kernel(
+                        ((nx * (band.stop - band.start) * ny * chunk + 127) // 128,),
                         (128,),
                         (
-                            raw,
-                            lateral,
-                            self._elements[config],
-                            self._angles,
-                            self._starts,
-                            self._planes[config],
-                            *ints(ns, nc, na, nt, nl, npz, chunk, first, count),
-                            self._pz0,
+                            *self._planes,
+                            *self._second,
+                            *self._axes,
+                            self._slopes,
+                            self._iq,
+                            *ints(nx, nz, ny, npz, na, nt, chunk, first, count, band.start, band.stop - band.start),
+                            plane_z0,
                             self._dz,
-                            anchor,
-                            *self._constants,
+                            *[np.float32(v) for v in self._anchors],
                         ),
                     )
-                    self._spline_kernel(
-                        ((nl * na * chunk + 127) // 128,),
-                        (128,),
-                        (
-                            self._planes[config],
-                            self._second[config],
-                            self._upper,
-                            self._inverse,
-                            *ints(nl, npz, na, chunk, count),
-                        ),
-                    )
-                self._expand_kernel(
-                    ((nx * nz * ny * chunk + 127) // 128,),
-                    (128,),
-                    (
-                        *self._planes,
-                        *self._second,
-                        *self._axes,
-                        self._slopes,
-                        self._iq,
-                        *ints(nx, nz, ny, npz, na, nt, chunk, first, count),
-                        self._pz0,
-                        self._dz,
-                        *[np.float32(v) for v in self._anchors],
-                    ),
-                )
             cp.cuda.Stream.null.synchronize()
             return self._iq

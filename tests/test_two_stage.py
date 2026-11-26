@@ -160,3 +160,20 @@ def test_moving_target_phase():
 def test_undersampled_reference_planes_are_identified(density):
     with pytest.warns(UserWarning, match="Axial undersampling"):
         two_stage_opw_numpy(*_case(1), samples_per_wavelength=density)
+
+
+@pytest.mark.parametrize("on_gpu", [False, True])
+def test_aperture_uses_target_depth(on_gpu):
+    geom = RCAGeometry(np.array([0.00205]), np.zeros(1), fs=20e6, f_demod=15e6, fnumber=1)
+    angles = np.array([0.14])
+    grid = (np.zeros(1), np.array([0.004, 0.0042, 0.004]), np.array([-0.004, 0.004]))
+    rc = np.ones((256, 1, 1, 3), np.complex64)
+    cr = np.zeros_like(rc)
+    if on_gpu:
+        cp = pytest.importorskip("cupy")
+        workspace = TwoStageOpwWorkspace(rc.shape, angles, 0, grid, geom, frame_chunk=2)
+        result = cp.asnumpy(workspace.reconstruct(cp.asarray(rc), cp.asarray(cr)))
+    else:
+        result = two_stage_opw_numpy(rc, cr, angles, 0, grid, geom)
+    np.testing.assert_array_equal(result[:, [0, 2]], 0)
+    np.testing.assert_allclose(abs(result[:, 1]), 1, atol=0.05)

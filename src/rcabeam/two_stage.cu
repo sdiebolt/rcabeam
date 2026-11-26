@@ -13,7 +13,7 @@ extern "C" __global__ void planes(
     const float *angles, const float *starts, float2 *out,
     int ns, int nc, int na, int nt, int nl, int nz, int chunk,
     int first, int count, float z0, float dz, float anchor,
-    float c, float fs, float fd, float fn) {
+    float c, float fs, float fd, float fn, float aperture_depth) {
   size_t point = (size_t)blockIdx.x * 4 + threadIdx.x / 32;
   if (point >= (size_t)nl * nz * na) return;
   int lane = threadIdx.x % 32;
@@ -31,7 +31,7 @@ extern "C" __global__ void planes(
     float w = 0, co = 0, si = 0;
     if (lane == 0) {
       float d = lateral[il] - elements[ch];
-      if (fn <= 0 || fabsf(d) <= z / (2 * fn)) {
+      if (fn <= 0 || fabsf(d) <= aperture_depth / (2 * fn)) {
         float tau = tx + sqrtf(z * z + d * d) / c;
         float sample = (tau - starts[angle]) * fs;
         index = sample >= 0 && sample <= ns - 1 ? (int)floorf(sample) : -1;
@@ -97,14 +97,14 @@ extern "C" __global__ void expand(
     const float2 *rc, const float2 *cr, const float2 *rc_second, const float2 *cr_second,
     const float *x, const float *z, const float *y, const float *slopes, float2 *out,
     int nx, int nz, int ny, int npz, int na, int nt, int chunk, int first, int count,
-    float plane_z0, float plane_dz, float x0, float y0) {
+    int depth_start, int depth_count, float plane_z0, float plane_dz, float x0, float y0) {
   size_t item = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-  size_t nv = (size_t)nx * nz * ny;
+  size_t nv = (size_t)nx * depth_count * ny;
   if (item >= nv * chunk) return;
   int frame = item % chunk;
   if (frame >= count) return;
   size_t voxel = item / chunk;
-  int iy = voxel % ny, iz = (voxel / ny) % nz, ix = voxel / ny / nz;
+  int iy = voxel % ny, iz = depth_start + (voxel / ny) % depth_count, ix = voxel / ny / depth_count;
   float2 sum = make_float2(0, 0);
   for (int angle = 0; angle < na; ++angle) {
     // Our transmit delay uses +u*sin(theta), opposite the paper's angle sign.
@@ -113,5 +113,5 @@ extern "C" __global__ void expand(
     sum = add(sum, lookup(rc, rc_second, ix, angle, frame, na, npz, chunk, pr));
     sum = add(sum, lookup(cr, cr_second, iy, angle, frame, na, npz, chunk, pq));
   }
-  out[voxel * nt + first + frame] = sum;
+  out[(((size_t)ix * nz + iz) * ny + iy) * nt + first + frame] = sum;
 }
