@@ -34,7 +34,7 @@ extern "C" __global__ void planes(
       if (fn <= 0 || fabsf(d) <= z / (2 * fn)) {
         float tau = tx + sqrtf(z * z + d * d) / c;
         float sample = (tau - starts[angle]) * fs;
-        index = (int)floorf(sample);
+        index = sample >= 0 && sample <= ns - 1 ? (int)floorf(sample) : -1;
         w = sample - index;
         sincosf(6.283185307179586f * fd * tau, &si, &co);
       }
@@ -43,9 +43,9 @@ extern "C" __global__ void planes(
     w = __shfl_sync(0xffffffff, w, 0);
     co = __shfl_sync(0xffffffff, co, 0);
     si = __shfl_sync(0xffffffff, si, 0);
-    if (frame < count && index >= 0 && index < ns - 1) {
+    if (frame < count && index >= 0) {
       size_t offset = (((size_t)index * nc + ch) * na + angle) * nt + first + frame;
-      float2 a = raw[offset], b = raw[offset + (size_t)nc * na * nt];
+      float2 a = raw[offset], b = raw[index == ns - 1 ? offset : offset + (size_t)nc * na * nt];
       float re = fmaf(w, b.x - a.x, a.x), im = fmaf(w, b.y - a.y, a.y);
       sum.x = fmaf(-si, im, fmaf(co, re, sum.x));
       sum.y = fmaf(si, re, fmaf(co, im, sum.y));

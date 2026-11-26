@@ -37,3 +37,17 @@ def test_invalid_pulse_sampling(fs: float, bandwidth: float) -> None:
     """Reject rates without an anti-alias transition band and invalid bandwidths."""
     with pytest.raises(ValueError):
         sample_bandlimited_pulse(np.array([10e-6]), 400, 0.0, fs, bandwidth)
+
+
+@pytest.mark.parametrize("use_cuda", [False, True])
+def test_closed_receive_window(use_cuda):
+    from rcabeam import RCAGeometry, delay_rca_channel_data
+
+    if use_cuda:
+        pytest.importorskip("rcabeam._cuda_impl")
+    zero = np.zeros(1)
+    geom = RCAGeometry(zero, zero, c=2, fs=1, f_demod=0, fnumber=None)
+    grid = (zero, np.array([0, 1.5, 2, 2.25]), zero)
+    raw = np.arange(1, 4, dtype=np.complex64).reshape(3, 1, 1)
+    _, angles, _ = delay_rca_channel_data(raw, zero, 0, grid, geom, "RC", use_cuda=use_cuda)
+    np.testing.assert_array_equal(angles.ravel(), [1, 2.5, 3, 0])

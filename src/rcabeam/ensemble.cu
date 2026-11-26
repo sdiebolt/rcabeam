@@ -88,19 +88,20 @@ __device__ float2 interpolate(const float2 *iq, float4 params, size_t ns,
                               size_t nc, size_t na, size_t nt, size_t ch,
                               size_t angle, size_t frame) {
   int i0 = static_cast<int>(params.x);
-  if (frame >= nt || i0 < 0 || i0 >= ns - 1)
+  if (frame >= nt || i0 < 0 || (i0 >= ns || (i0 == ns - 1 && params.y != 0)))
     return make_float2(0, 0);
   float w = params.y, co = params.z, s = params.w;
   size_t index =
       ((ch * na + angle) * ns + static_cast<size_t>(i0)) * nt + frame;
+  size_t next = i0 == ns - 1 ? index : index + nt;
   float2 a, b;
   if constexpr (HALF) {
     const __half2 *packed = reinterpret_cast<const __half2 *>(iq);
     a = __half22float2(packed[index]);
-    b = __half22float2(packed[index + nt]);
+    b = __half22float2(packed[next]);
   } else {
     a = iq[index];
-    b = iq[index + nt];
+    b = iq[next];
   }
   float2 value = make_float2(fmaf(w, b.x - a.x, a.x), fmaf(w, b.y - a.y, a.y));
   return mul(value, make_float2(co, s));
@@ -379,7 +380,7 @@ opw_cooperative(const float2 *rc, const float2 *cr, const float4 *rx,
           int i0 = static_cast<int>(floorf(index));
           float2 phase_weight = phase_weights[threadIdx.x / FRAME_LANES][source];
           float4 p = make_float4(index, index - i0, phase_weight.x, phase_weight.y);
-          if (voxel < nv && i0 >= 0 && i0 < ns - 1) {
+          if (voxel < nv && index >= 0 && index <= ns - 1) {
             constexpr int VECTORS = THREAD_FRAMES / OPW_VECTOR_FRAMES;
             float4 first[VECTORS], second[VECTORS];
             // Issue independent sample loads before waiting on interpolation.
@@ -393,7 +394,7 @@ opw_cooperative(const float2 *rc, const float2 *cr, const float4 *rx,
                                       nt +
                                   frame;
                 first[tile] = load_iq_pair<HALF>(iq, offset);
-                second[tile] = load_iq_pair<HALF>(iq, offset + nt);
+                second[tile] = load_iq_pair<HALF>(iq, i0 == ns - 1 ? offset : offset + nt);
               }
             }
 #pragma unroll

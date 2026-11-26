@@ -280,9 +280,9 @@ def delay_rca_channels(
         idx = (tau - starts[m]) * geom.fs
         i0 = np.floor(idx).astype(np.int64)
         w = (idx - i0).astype(np.float32)
-        valid = (i0 >= 0) & (i0 < nsamp - 1)
-        i0c = np.clip(i0, 0, nsamp - 2)
-        val = (1 - w) * iq_ch[i0c, channels, m] + w * iq_ch[i0c + 1, channels, m]
+        valid = (idx >= 0) & (idx <= nsamp - 1)
+        i0c = np.clip(i0, 0, nsamp - 1)
+        val = (1 - w) * iq_ch[i0c, channels, m] + w * iq_ch[np.minimum(i0c + 1, nsamp - 1), channels, m]
         val *= np.exp(2j * np.pi * geom.f_demod * tau) * (apod * valid)
         out[:, m] = val.sum(axis=1)
     return out.reshape((len(x), len(z), len(y), n_angles))
@@ -383,9 +383,9 @@ def delay_rca_channel_data(
         idx = (tau - starts[m]) * geom.fs
         i0 = np.floor(idx).astype(np.int64)
         w = (idx - i0).astype(np.float32)
-        valid = (i0 >= 0) & (i0 < nsamp - 1)
-        i0c = np.clip(i0, 0, nsamp - 2)
-        val = (1 - w) * iq_ch[i0c, channels, m] + w * iq_ch[i0c + 1, channels, m]
+        valid = (idx >= 0) & (idx <= nsamp - 1)
+        i0c = np.clip(i0, 0, nsamp - 1)
+        val = (1 - w) * iq_ch[i0c, channels, m] + w * iq_ch[np.minimum(i0c + 1, nsamp - 1), channels, m]
         val *= np.exp(2j * np.pi * geom.f_demod * tau) * (apod * valid)
         channel_sum += val
         angle_sum[:, m] = val.sum(axis=1)

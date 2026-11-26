@@ -173,12 +173,12 @@ __device__ __forceinline__ float2 delay_sample(
   float tau = tau_tx + sqrtf(z * z + dv * dv) / c;
   float sample = (tau - t_start[angle]) * fs;
   int i0 = static_cast<int>(floorf(sample));
-  if (i0 < 0 || i0 >= static_cast<int>(n_samples) - 1)
+  if (!(sample >= 0 && sample <= n_samples - 1))
     return make_float2(0.0f, 0.0f);
   float w = sample - static_cast<float>(i0);
   size_t idx0 = (static_cast<size_t>(i0) * n_channels + ch) * n_angles + angle;
   size_t idx1 =
-      (static_cast<size_t>(i0 + 1) * n_channels + ch) * n_angles + angle;
+      ((i0 == n_samples - 1 ? i0 : i0 + 1) * static_cast<size_t>(n_channels) + ch) * n_angles + angle;
   float2 a = iq_ch[idx0];
   float2 b = iq_ch[idx1];
   float2 val =
