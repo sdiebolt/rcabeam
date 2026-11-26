@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from rcabeam import RCAGeometry, beamform_ensemble, ensemble_pd_from_channels
+from rcabeam import RCAGeometry, beamform_apertures, beamform_ensemble, ensemble_pd_from_channels
 from rcabeam.dmas import dmas_ccf_acf_core
 from rcabeam.ensemble import EnsembleTiming
 from rcabeam.fmas import rc_fmas
@@ -37,6 +37,9 @@ def test_batched_methods(frames: int, fnumber: float | None) -> None:
     iq = np.concatenate([np.stack(ar, axis=-1), np.stack(aq, axis=-1)], axis=-2)
     ri, qi = np.arange(4), np.arange(4, 8)
     signals = {"opw": opw_numpy(iq), "xdoppler": xdoppler_signal(iq, ri, qi), "rc_fmas": rc_fmas(iq, ri, qi)}
+    r, q = beamform_apertures(rc, cr, angles, starts, grid, geom)
+    np.testing.assert_allclose(r, iq[..., ri, :].sum(axis=-2), rtol=5e-4, atol=5e-4)
+    np.testing.assert_allclose(q, iq[..., qi, :].sum(axis=-2), rtol=5e-4, atol=5e-4)
     for method, expected in signals.items():
         metrics: EnsembleTiming = {"raw_upload_seconds": -1.0}
         actual = beamform_ensemble(rc, cr, angles, starts, grid, geom, method=method, timings=metrics)

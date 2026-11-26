@@ -355,7 +355,19 @@ volume = ensemble_pd_from_channels(rc, cr, angles, t_start, grid, geom, method="
 This replaces the removed `opw_ensemble_pd_from_channels` wrapper and original
 ensemble kernel; `--compare-baseline` is no longer offered.
 
-**Only OPW exports conventional linear beamformed IQ.** XDoppler exports complex
+For clutter-filtered XDoppler, use separate coherent aperture ensembles:
+
+```python
+import numpy as np
+from rcabeam import beamform_apertures, svd_clutter_filter
+
+r, q = beamform_apertures(rc, cr, angles, t_start, grid, geom)
+r = svd_clutter_filter(r, rank_start=rank_start)
+q = svd_clutter_filter(q, rank_start=rank_start)
+volume = np.abs(np.mean(r * q.conj(), axis=-1))
+```
+
+This example estimates independent aperture bases. The existing XDoppler signal API exports complex
 cross-products; RC-FMAS exports nonlinear complex signals. Their outputs are not
 interchangeable with conventional IQ. DMAS returns a real weighted response,
 not conventional power Doppler.

@@ -11,7 +11,7 @@ from rcabeam.sim import RCAGeometry, _scan_coords
 
 Method = Literal["opw", "xdoppler", "rc_fmas", "dmas", "st_sw"]
 IQStorage = Literal["float32", "float16"]
-_METHODS = {"opw": 0, "xdoppler": 1, "rc_fmas": 2, "dmas": 3, "st_sw": 4}
+_METHODS = {"opw": 0, "xdoppler": 1, "rc_fmas": 2, "dmas": 3, "st_sw": 4, "apertures": 5}
 
 
 class EnsembleTiming(TypedDict):
@@ -55,14 +55,14 @@ def _run(
     t_start: float | NDArray[np.floating],
     grid: tuple[NDArray[np.floating], NDArray[np.floating], NDArray[np.floating]],
     geom: RCAGeometry,
-    method: Method,
+    method: Method | Literal["apertures"],
     k: int,
     return_signal: bool,
     timings: EnsembleTiming | None,
     iq_storage: IQStorage,
 ) -> tuple[NDArray[np.float32], NDArray[np.complex64]]:
     """Validate ensemble inputs and execute the frame-batched CUDA binding."""
-    if method not in _METHODS:
+    if method not in _METHODS or (method == "apertures" and not return_signal):
         raise ValueError(f"Unknown method: {method}")
     if iq_storage not in ("float32", "float16") or (iq_storage == "float16" and method != "opw"):
         raise ValueError("IQ storage must be float32, or float16 for OPW only")
@@ -93,7 +93,8 @@ def _run(
         scan = np.ascontiguousarray(scan[order])
     pd = np.empty((nv, 2), dtype=np.float32)
     weights = np.empty(nv if method == "st_sw" else 0, dtype=np.float32)
-    signal = np.empty((nv if return_signal else 0, nt), dtype=np.complex64)
+    planes = 2 if method == "apertures" else 1
+    signal = np.empty((nv * planes if return_signal else 0, nt), dtype=np.complex64)
     raw_upload_seconds = ensemble_from_channels(
         np.ascontiguousarray(rc, dtype=np.complex64),
         np.ascontiguousarray(cr, dtype=np.complex64),
@@ -123,7 +124,8 @@ def _run(
     if method == "st_sw":
         peak = weights.max()
         power *= weights / peak if peak > 0 else 0
-    return power.reshape(shape), signal.reshape((*shape, nt)) if return_signal else signal
+    signal_shape = (*shape, 2, nt) if method == "apertures" else (*shape, nt)
+    return power.reshape(shape), signal.reshape(signal_shape) if return_signal else signal
 
 
 def ensemble_pd_from_channels(
@@ -184,8 +186,9 @@ def ensemble_pd_from_channels(
     Notes
     -----
     This is an unfiltered reduction, NOT a complete functional ultrasound
-    pipeline. Use `beamform_ensemble` and a clutter filter before power Doppler
-    when the application requires slow-time filtering.
+    pipeline. For filtered OPW, filter the linear IQ from `beamform_ensemble`
+    before power reduction. For XDoppler, filter both outputs of
+    `beamform_apertures` before forming their complex cross-product.
     """
     return _run(rc, cr, angles, t_start, grid, geom, method, k, False, timings, iq_storage)[0]
 
@@ -202,7 +205,7 @@ def beamform_ensemble(
     timings: EnsembleTiming | None = None,
     iq_storage: IQStorage = "float32",
 ) -> NDArray[np.complex64]:
-    """Return a complex slow-time reconstruction for subsequent clutter filtering.
+    """Return linear OPW IQ or the specified nonlinear slow-time signal.
 
     Parameters
     ----------
@@ -240,3 +243,20 @@ def beamform_ensemble(
     if method not in ("opw", "xdoppler", "rc_fmas"):
         raise ValueError("Only OPW, XDoppler and RC-FMAS have complex signal outputs")
     return _run(rc, cr, angles, t_start, grid, geom, method, 2, True, timings, iq_storage)[1]
+
+
+def beamform_apertures(
+    rc: NDArray[np.complex64],
+    cr: NDArray[np.complex64],
+    angles: NDArray[np.floating],
+    t_start: float | NDArray[np.floating],
+    grid: tuple[NDArray[np.floating], NDArray[np.floating], NDArray[np.floating]],
+    geom: RCAGeometry,
+) -> tuple[NDArray[np.complex64], NDArray[np.complex64]]:
+    """Return separately compounded RC and CR IQ, each shaped (nx, nz, ny, frames).
+
+    Acquisition inputs follow beamform_ensemble. Filter these linear ensembles
+    before computing abs(mean(rc_filtered * conj(cr_filtered), axis=-1)).
+    """
+    _, iq = _run(rc, cr, angles, t_start, grid, geom, "apertures", 2, True, None, "float32")
+    return iq[..., 0, :], iq[..., 1, :]

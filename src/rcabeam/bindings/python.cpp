@@ -507,9 +507,11 @@ double ensemble_from_channels(
 ) {
     size_t ns=rc.shape(0), nc=rc.shape(1), na=rc.shape(2), nt=rc.shape(3), nv=scan.shape(0);
     for (size_t axis=0; axis<4; ++axis) if (rc.shape(axis) != cr.shape(axis)) throw std::invalid_argument("RC/CR ensemble shapes must match");
-    if (ns<2 || !nc || !na || !nt || !nv || method<0 || method>4) throw std::invalid_argument("invalid ensemble dimensions or method");
+    if (ns<2 || !nc || !na || !nt || !nv || method<0 || method>5) throw std::invalid_argument("invalid ensemble dimensions or method");
     if (xe.shape(0)!=nc || ye.shape(0)!=nc || angles.shape(0)!=na || starts.shape(0)!=na) throw std::invalid_argument("geometry must match channel data");
-    if (pd.shape(0)!=nv || (method==4 && weights.shape(0)!=nv) || signal.shape(1)!=nt || (signal.shape(0)!=0 && signal.shape(0)!=nv)) throw std::invalid_argument("invalid ensemble output shapes");
+    size_t signal_planes = method == 5 ? 2 : 1;
+    if (method == 5 && signal.shape(0) == 0) throw std::invalid_argument("separate apertures require signal output");
+    if (pd.shape(0)!=nv || (method==4 && weights.shape(0)!=nv) || signal.shape(1)!=nt || (signal.shape(0)!=0 && signal.shape(0)!=nv*signal_planes)) throw std::invalid_argument("invalid ensemble output shapes");
     if (method==4 && (k<2 || k>4 || na<static_cast<size_t>(k))) throw std::invalid_argument("St-SW needs 2<=k<=4 and at least k angles");
     if (half_storage && method != 0) throw std::invalid_argument("FP16 IQ storage is supported only for OPW");
     DeviceBuffer<std::complex<float>> owned_rc(rc.device_type()==nb::device::cpu::value ? rc.nbytes():1);
@@ -558,7 +560,7 @@ double ensemble_from_channels(
         if (half_storage) {
             check_status(rcabeam_opw_fp16_device(packed_rc.ptr,packed_cr.ptr,ds+3*start,dx,dy,da,dt,dp+2*start,di ? di+start*nt:nullptr,geometry_workspace.ptr,ns,nc,na,nt,count,c,fs,fd,fn));
         } else {
-            check_status(rcabeam_ensemble_device(packed_rc.ptr,packed_cr.ptr,ds+3*start,dx,dy,da,dt,dp+2*start,di ? di+start*nt:nullptr,dw ? dw+start:nullptr,workspace.ptr,geometry_workspace.ptr,ns,nc,na,nt,count,c,fs,fd,fn,method,k));
+            check_status(rcabeam_ensemble_device(packed_rc.ptr,packed_cr.ptr,ds+3*start,dx,dy,da,dt,dp+2*start,di ? di+start*nt*signal_planes:nullptr,dw ? dw+start:nullptr,workspace.ptr,geometry_workspace.ptr,ns,nc,na,nt,count,c,fs,fd,fn,method,k));
         }
     }
     check_cuda(cudaDeviceSynchronize());

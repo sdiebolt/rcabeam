@@ -2,7 +2,7 @@
 
 from rcabeam.clutter import svd_clutter_filter, temporal_basis
 from rcabeam.dmas import dmas_bruteforce, dmas_ccf_acf_core, dmas_ccf_acf_frame
-from rcabeam.ensemble import beamform_ensemble, ensemble_pd_from_channels
+from rcabeam.ensemble import beamform_apertures, beamform_ensemble, ensemble_pd_from_channels
 from rcabeam.fmas import rc_fmas, rc_fmas_pd, signed_sqrt
 from rcabeam.fused import (
     dmas_ccf_acf_from_channels,
@@ -19,6 +19,7 @@ from rcabeam.xdoppler import compound_rc_cr, xdoppler_pd, xdoppler_signal
 
 __all__ = [
     "RCAGeometry",
+    "beamform_apertures",
     "beamform_ensemble",
     "compound_rc_cr",
     "delay_rca_channel_data",

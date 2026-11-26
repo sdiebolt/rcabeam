@@ -275,6 +275,16 @@ __global__ void beamform_tiled(const float2 *rc, const float2 *cr,
       }
     }
   }
+  if constexpr (METHOD == 5) {
+    for (int t = 0; t < REGISTER_FRAMES; ++t) {
+      size_t frame = frame0 + t * FRAME_LANES;
+      if (frame < nt) {
+        signal[(2 * voxel) * nt + frame] = r[t];
+        signal[(2 * voxel + 1) * nt + frame] = q[t];
+      }
+    }
+    return;
+  }
   float pr = 0, pi = 0;
 #pragma unroll
   for (int t = 0; t < REGISTER_FRAMES; ++t) {
@@ -600,7 +610,7 @@ static rcabeam_status ensemble_impl(
     float fd, float fn, int method, int k) {
   if (!rc || !cr || !scan || !xe || !ye || !angles || !starts || !pd ||
       ns < 2 || !nc || !na || !nt || !nv || c <= 0 || fs <= 0 || method < 0 ||
-      method > 4 || !isfinite(c) || !isfinite(fs) || !isfinite(fd) ||
+      method > 5 || (method == 5 && !signal) || !isfinite(c) || !isfinite(fs) || !isfinite(fd) ||
       !isfinite(fn))
     return RCABEAM_ERROR_ARGUMENT;
   if (HALF && method != 0)
@@ -667,6 +677,9 @@ static rcabeam_status ensemble_impl(
     } else {
       TILED(0);
     }
+    break;
+  case 5:
+    TILED(5);
     break;
   case 1:
     TILED(1);
