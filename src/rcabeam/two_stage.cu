@@ -122,9 +122,44 @@ __device__ float2 lookup(const float2 *p, const float2 *second, size_t lateral,
                         scale(second[offset + stride], (w * w * w - w) / 6)));
 }
 
+#if STSW
+__device__ float norm2(float2 a) { return a.x * a.x + a.y * a.y; }
+
+__device__ float2 cross(float2 a, float2 b) {
+  return make_float2(a.x * b.x + a.y * b.y, a.y * b.x - a.x * b.y);
+}
+
+__device__ float2 coherence(float2 r, float2 q, float var_r, float var_q) {
+  float2 n = cross(r, q);
+  float d = norm2(r) + norm2(q) + 0.5f * (var_r + var_q) - hypotf(n.x, n.y);
+  return d > 0 ? make_float2(n.x / d, n.y / d) : make_float2(0, 0);
+}
+
+extern "C" __global__ void finish_stsw(const float *stats, float *weights,
+                                      float *power, size_t nv, int nt) {
+  size_t v = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+  if (v >= nv) return;
+  float2 weight = make_float2(0, 0);
+  for (int i = 2; i <= 6; i += 4) {
+    float den = sqrtf(stats[(i + 2) * nv + v] * stats[(i + 3) * nv + v]);
+    if (den > 0) {
+      weight.x += stats[i * nv + v] / den;
+      weight.y += stats[(i + 1) * nv + v] / den;
+    }
+  }
+  weights[v] = hypotf(weight.x, weight.y);
+  power[v] = hypotf(stats[v], stats[nv + v]) / nt;
+}
+#endif
+
 extern "C" __global__ void expand(
     const float2 *rc, const float2 *cr, const float2 *rc_second, const float2 *cr_second,
-    const float *z, const float *slopes, float2 *out,
+    const float *z, const float *slopes,
+#if STSW
+    float *out,
+#else
+    float2 *out,
+#endif
     int nx, int nz, int ny, int npz, int na, int nt, int chunk, int first, int count,
     int depth_start, int depth_count, float plane_z0, float plane_dz,
     const int *x_plane, const float *x_offset, const int *y_plane, const float *y_offset
@@ -136,11 +171,18 @@ extern "C" __global__ void expand(
   size_t nv = (size_t)nx * depth_count * ny;
   if (item >= nv * chunk) return;
   int frame = item % chunk;
+#if !STSW
   if (frame >= count) return;
+#endif
   size_t voxel = item / chunk;
   int iy = voxel % ny, iz = depth_start + (voxel / ny) % depth_count, ix = voxel / ny / depth_count;
+#if STSW
+  float2 rsum[2] = {}, qsum[2] = {};
+  float renergy[2] = {}, qenergy[2] = {};
+#else
   float2 sum = make_float2(0, 0);
-  for (int angle = 0; angle < na; ++angle) {
+#endif
+  for (int angle = 0; angle < na && frame < count; ++angle) {
     // Our transmit delay uses +u*sin(theta), opposite the paper's angle sign.
     float pr = (z[iz] + y_offset[iy] * slopes[angle] - plane_z0) / plane_dz;
     float pq = (z[iz] + x_offset[ix] * slopes[angle] - plane_z0) / plane_dz;
@@ -153,7 +195,49 @@ extern "C" __global__ void expand(
     r = multiply(r, multiply(axial, y_phase[(size_t)iy * na + angle]));
     q = multiply(q, multiply(axial, x_phase[(size_t)ix * na + angle]));
 #endif
+#if STSW
+    int group = angle % 2;
+    rsum[group] = add(rsum[group], r);
+    qsum[group] = add(qsum[group], q);
+    renergy[group] += norm2(r);
+    qenergy[group] += norm2(q);
+#else
     sum = add(add(sum, r), q);
+#endif
   }
-  out[(((size_t)ix * nz + iz) * ny + iy) * nt + first + frame] = sum;
+  size_t v = ((size_t)ix * nz + iz) * ny + iy;
+#if STSW
+  float2 xd = cross(add(rsum[0], rsum[1]), add(qsum[0], qsum[1]));
+  for (int i = 0; i < 2; ++i) {
+    float inv = 1.f / ((na + 1 - i) / 2);
+    rsum[i] = scale(rsum[i], inv);
+    qsum[i] = scale(qsum[i], inv);
+    renergy[i] = fmaxf(0, renergy[i] * inv - norm2(rsum[i]));
+    qenergy[i] = fmaxf(0, qenergy[i] * inv - norm2(qsum[i]));
+  }
+  float moments[10] = {xd.x, xd.y};
+  // The two disjoint subset pairs are (00,11) and (01,10).
+  for (int j = 0; j < 2; ++j) {
+    float2 a = coherence(rsum[0], qsum[j], renergy[0], qenergy[j]);
+    float2 b = coherence(rsum[1], qsum[1 - j], renergy[1], qenergy[1 - j]);
+    float2 prod = cross(a, b);
+    int i = 2 + 4 * j;
+    moments[i] = prod.x;
+    moments[i + 1] = prod.y;
+    moments[i + 2] = norm2(a);
+    moments[i + 3] = norm2(b);
+  }
+  // Exactly one warp per voxel, including zero-filled lanes in a partial chunk.
+  for (int i = 0; i < 10; ++i) {
+    float value = moments[i];
+    for (int offset = 16; offset; offset /= 2)
+      value += __shfl_down_sync(0xffffffff, value, offset);
+    if (frame == 0) {
+      size_t index = ((size_t)i * nx * nz * ny) + v;
+      out[index] = first == 0 ? value : out[index] + value;
+    }
+  }
+#else
+  out[v * nt + first + frame] = sum;
+#endif
 }

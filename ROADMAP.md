@@ -1629,3 +1629,40 @@ from conventional OPW by 7.68% relative L2.
 The fastest default RCA row missed 400 ms by 4.4 ms before clutter filtering.
 The FPM reference used a 32 × 32 matrix acquisition with five waves and a
 94 × 157 × 94 grid. All benchmark numerical checks passed. One-second monitoring detected no competing GPU activity.
+
+### Two-subset baseband St-SW
+
+The prototype forms the two interleaved subset means and variances separately
+for RC and CR while expanding each voxel. Ten real sums per voxel capture the
+complex XDoppler cross-product and the two disjoint normalized temporal
+correlations. The weight uses the global maximum over the volume. Frame chunks
+share these sums, avoiding a full per-angle, per-frame volume.
+
+The comparison used the same 80+80 elements, 16+16 angles, 200 frames,
+80 × 157 × 80 grid, and four axial samples/λ for both baseband candidates.
+Numbers below are host-to-host medians from five warmed, randomly interleaved
+trials, including workspace setup, channel uploads and download of both maps.
+The filtered scene re-estimates a shared RC/CR channel Gram basis in complex64,
+removes its three strongest modes, and applies it on the GPU within each trial.
+The tissue/blood/noise scene models fixed scatterers with varying complex
+amplitudes. Errors are whole-volume relative L2 against conventional two-subset
+St-SW on the same inputs.
+
+| Scene | Conventional ms | One plane ms | Two planes ms | Weighted power error, one / two | Weight-map error, one / two |
+|---|---:|---:|---:|---:|---:|
+| Five common-phase targets | 1139.4 | 329.1 | 380.1 | 3.94% / 8.64% | 39.62% / 37.26% |
+| Tissue, blood and noise | 1139.1 | 329.5 | 380.1 | 7.22% / 2.66% | 40.89% / 36.91% |
+| Same mixture with channel clutter filtering | 1196.7 | 360.2 | 412.1 | 6.65% / 2.28% | 38.28% / 30.45% |
+
+One plane finished all five filtered trials in 359.9–360.5 ms against the 400 ms
+ensemble interval. Two planes lowered the filtered power error and missed the
+interval by 12.1 ms at the median. On the filtered scene the mean absolute
+weight difference on the 0–1 scale was 0.0587 / 0.0464 across the full grid,
+and 0.0057 / 0.0021 in the 312 voxels above or at 1% of peak reference power.
+Check the effect on weak vessels in acquired data before selecting a default.
+One-second monitoring detected no competing GPU activity. The 25 two-stage tests passed on the GPU,
+including a comparison against independently reconstructed per-angle NumPy
+signals, unequal angle-subset sizes, a partial frame chunk and a zero ensemble.
+
+Reproduce with `PYTHONPATH=examples uv run python -m _support.stsw_baseband_benchmark --scene filtered`.
+Use `--scene common` and `--scene mixture` for the two unfiltered comparisons.

@@ -222,3 +222,38 @@ def test_baseband_preserves_aperture_at_output_depth(n_planes, on_gpu):
         cp = pytest.importorskip("cupy")
         ws = TwoStageOpwWorkspace(rc.shape, angles, 0, grid, geom, frame_chunk=2, **options)
         np.testing.assert_allclose(cp.asnumpy(ws.reconstruct(cp.asarray(rc), cp.asarray(cr))), expected, atol=0.002)
+
+
+@pytest.mark.parametrize("n_planes", [1, 2])
+def test_two_stage_stsw_matches_per_angle_numpy(n_planes):
+    """Check subset assignment, remodulation, frame tails, and global normalization."""
+    cp = pytest.importorskip("cupy")
+    from rcabeam.stsw import st_sw_pd, st_sw_weights
+    from rcabeam.two_stage import TwoStageStswWorkspace
+
+    rng = np.random.default_rng(21)
+    el = np.array([-0.0003, 0.0001])
+    geom = RCAGeometry(el, el[::-1], fs=12e6, f_demod=5e6, fnumber=1)
+    angles = np.array([-0.1, -0.04, 0.03, 0.08, 0.13])
+    grid = (np.array([-0.0005, 0.0002]), np.array([0.003, 0.004]), np.array([-0.0007, 0.0003]))
+    shape = (96, 2, len(angles), 35)
+    raw = [(rng.normal(size=shape) + 1j * rng.normal(size=shape)).astype(np.complex64) for _ in range(2)]
+    by_angle = []
+    for config in (0, 1):
+        for a in range(len(angles)):
+            parts = [np.zeros_like(v) for v in raw]
+            parts[config][:, :, a] = raw[config][:, :, a]
+            by_angle.append(
+                two_stage_opw_numpy(
+                    *parts, angles, 0, grid, geom, samples_per_wavelength=4, n_planes=n_planes, baseband=True
+                )
+            )
+    iq = np.stack(by_angle, axis=-2)
+    ir = np.arange(len(angles))
+    ic = ir + len(ir)
+    ws = TwoStageStswWorkspace(shape, angles, 0, grid, geom, n_planes=n_planes)
+    w, p = ws.reconstruct(*map(cp.asarray, raw))
+    np.testing.assert_allclose(cp.asnumpy(w), st_sw_weights(iq, ir, ic, k=2), rtol=0.003, atol=0.0001)
+    np.testing.assert_allclose(cp.asnumpy(p), st_sw_pd(iq, ir, ic, k=2), rtol=0.003, atol=0.001)
+    for v in ws.reconstruct(*[cp.zeros(shape, cp.complex64) for _ in range(2)]):
+        np.testing.assert_array_equal(cp.asnumpy(v), 0)

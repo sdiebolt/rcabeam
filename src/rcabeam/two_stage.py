@@ -216,6 +216,8 @@ class TwoStageOpwWorkspace:
     or ordered on the default stream. No clutter filter or FP16 path.
     """
 
+    _stsw = False
+
     def __init__(
         self,
         channel_shape,
@@ -235,7 +237,7 @@ class TwoStageOpwWorkspace:
         self._shape, angles, starts, axes, elements, layouts, slopes, pz, constants = plan
         if index(frame_chunk) < 1:
             raise ValueError("Frame chunk must be positive")
-        self._chunk = min(index(frame_chunk), self._shape[-1])
+        self._chunk = 32 if self._stsw else min(index(frame_chunk), self._shape[-1])
         self._device = cp.cuda.Device().id
         self._check_context()
         self._lock = Lock()
@@ -270,11 +272,24 @@ class TwoStageOpwWorkspace:
         ]
         self._second = [cp.empty_like(v) for v in self._planes]
         self._factors = {n: tuple(cp.asarray(v) for v in _spline_factors(n)) for n in lengths}
-        self._iq = cp.empty((*[len(v) for v in axes], self._shape[-1]), cp.complex64)
+        shape = tuple(len(v) for v in axes)
+        if self._stsw:
+            self._out = cp.empty((10, *shape), cp.float32)
+            self._weights = cp.empty(shape, cp.float32)
+            self._power = cp.empty(shape, cp.float32)
+        else:
+            self._out = cp.empty((*shape, self._shape[-1]), cp.complex64)
         module = cp.RawModule(
             code=Path(__file__).with_suffix(".cu").read_text(),
-            options=("--std=c++17", f"-DNPLANES={n_planes}", f"-DBASEBAND={int(baseband)}"),
+            options=(
+                "--std=c++17",
+                f"-DNPLANES={n_planes}",
+                f"-DBASEBAND={int(baseband)}",
+                f"-DSTSW={int(self._stsw)}",
+            ),
         )
+        if self._stsw:
+            self._finish_stsw = module.get_function("finish_stsw")
         self._plane_kernel, self._spline_kernel, self._expand_kernel = [
             module.get_function(v) for v in ("planes", "spline", "expand")
         ]
@@ -364,7 +379,7 @@ class TwoStageOpwWorkspace:
                             *second,
                             self._axes[1],
                             self._slopes,
-                            self._iq,
+                            self._out,
                             *ints(nx, nz, ny, npz, na, nt, chunk, first, count, band.start, band.stop - band.start),
                             self._plane_depths[knot_first],
                             self._dz,
@@ -374,5 +389,40 @@ class TwoStageOpwWorkspace:
                         ),
                     )
                     previous_first, previous_count = knot_first, npz
+            if self._stsw:
+                nv = self._weights.size
+                self._finish_stsw(
+                    ((nv + 127) // 128,), (128,), (self._out, self._weights, self._power, np.uint64(nv), np.int32(nt))
+                )
+                peak = self._weights.max()
+                self._weights /= cp.where(peak > 0, peak, cp.float32(1))
+                self._power *= self._weights
+                result = self._weights, self._power
+            else:
+                result = self._out
             cp.cuda.Stream.null.synchronize()
-            return self._iq
+            return result
+
+
+class TwoStageStswWorkspace(TwoStageOpwWorkspace):
+    """Experimental two-subset baseband St-SW with warp-sized slow-time chunks.
+
+    reconstruct returns borrowed (normalized weights, weighted XDoppler power).
+    The workspace accumulates ten real slow-time sums per voxel across frames.
+    """
+
+    _stsw = True
+
+    def __init__(self, channel_shape, angles, t_start, grid, geom, *, n_planes=1, samples_per_wavelength=4):
+        if len(angles) < 2:
+            raise ValueError("Two-subset St-SW requires at least two angles")
+        super().__init__(
+            channel_shape,
+            angles,
+            t_start,
+            grid,
+            geom,
+            n_planes=n_planes,
+            samples_per_wavelength=samples_per_wavelength,
+            baseband=True,
+        )
