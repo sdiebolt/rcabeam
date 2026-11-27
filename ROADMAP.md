@@ -49,6 +49,8 @@ Each row compares two methods on the same synthetic acquisition. The timings pre
 
 The filtered comparisons retained ranks [3, 200). The one-plane St-SW and hybrid DMAS measurements met the synthetic throughput target with measurable changes in output. Historical DMAS timings used full-frame reconstruction. The current benchmark uses the viewer’s bounded frame chunks.
 
+Increasing hybrid DMAS from 32 to 128 frames per chunk reduced the median host-IQ-to-host-output time from 401.4 to 367.0 ms over three warmed CUDA trials. Peak active CuPy scratch increased from 0.99 to 3.61 GiB, excluding the resident input. The relative L2 difference between chunk sizes was 3.7 × 10⁻⁸. The default is 32 frames. Use `--dmas-frame-chunk 128` with the `dmas` or `all` suite to reproduce the larger-chunk configuration.
+
 ## Open work
 
 - Measure complete filtered workloads on the target GPU alongside component error, blood-target contrast and spatial profiles. Full-volume power error can hide local differences in weak signals.

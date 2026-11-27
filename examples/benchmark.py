@@ -20,6 +20,7 @@ def main(argv=None):
     parser.add_argument("--rank-stop", type=int, help="Exclusive final rank; defaults to original frame count")
     parser.add_argument("--density", type=float, nargs="+", help="Pipeline samples/wavelength; default: 8 16 32")
     parser.add_argument("--frame-chunk", type=int, help="Two-stage pipeline chunk; default: 32")
+    parser.add_argument("--dmas-frame-chunk", type=int, help="Hybrid DMAS chunk; default: 32")
     parser.add_argument(
         "--extended-clutter",
         action="store_true",
@@ -47,6 +48,11 @@ def main(argv=None):
         parser.error("--density/--frame-chunk require --suite pipeline or all")
     if args.frame_chunk is not None and args.frame_chunk < 1:
         parser.error("--frame-chunk must be positive")
+    if args.dmas_frame_chunk is not None:
+        if args.suite not in ("dmas", "all"):
+            parser.error("--dmas-frame-chunk requires --suite dmas or all")
+        if args.dmas_frame_chunk < 1:
+            parser.error("--dmas-frame-chunk must be positive")
     if args.density is not None and (
         any(not math.isfinite(d) or d < 2 for d in args.density) or len(set(args.density)) != len(args.density)
     ):
@@ -67,7 +73,10 @@ def main(argv=None):
                 **filtered, density=args.density or [8, 16, 32], frame_chunk=args.frame_chunk or 32
             )
         else:
-            result = importlib.import_module("_support.approximation_benchmark").run(family=suite, **filtered)
+            options = dict(family=suite, **filtered)
+            if suite == "dmas" and args.dmas_frame_chunk is not None:
+                options["frame_chunk"] = args.dmas_frame_chunk
+            result = importlib.import_module("_support.approximation_benchmark").run(**options)
         report["suites"][suite] = result
     if args.extended_clutter:
         accuracy = importlib.import_module("_support.clutter_accuracy")

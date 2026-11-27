@@ -15,7 +15,7 @@ from .gpu_monitor import monitor_gpu
 from .scene import TARGETS, native_maps
 
 
-def run(*, family, grid, elements, angles, frames, repeat, rank_start, rank_stop):
+def run(*, family, grid, elements, angles, frames, repeat, rank_start, rank_stop, frame_chunk=32):
     scene = clutter_scene(grid, elements, angles, frames)
     raw = scene.channels()
     axes, geom, steering = scene.grid, scene.geom, scene.angles
@@ -27,7 +27,7 @@ def run(*, family, grid, elements, angles, frames, repeat, rank_start, rank_stop
     else:
         methods = {
             "conventional": lambda data: (native_maps(data, axes, geom, steering, "dmas")[0],),
-            "hybrid": lambda data: (hybrid_dmas(data, steering, axes, geom),),
+            "hybrid": lambda data: (hybrid_dmas(data, steering, axes, geom, frame_chunk=frame_chunk),),
         }
     bus = cp.cuda.Device().pci_bus_id
     warm, trials = {}, {name: [] for name in methods}
@@ -81,4 +81,7 @@ def run(*, family, grid, elements, angles, frames, repeat, rank_start, rank_stop
             metrics["target_peak_ratios"] = peaks
         results[name] = metrics
         print(f"{family} {name}: {median(times):.1f} ms, relative L2 {errors}")
-    return dict(methods=results, channel_shape=list(raw[0].shape), rank_start=rank_start, rank_stop=rank_stop)
+    report = dict(methods=results, channel_shape=list(raw[0].shape), rank_start=rank_start, rank_stop=rank_stop)
+    if family == "dmas":
+        report["frame_chunk"] = frame_chunk
+    return report

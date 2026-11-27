@@ -39,6 +39,8 @@ def test_affine_iq_on_depth_knots():
     for result in (
         cp.asnumpy(reconstruct(raw)),
         _hybrid(raw, angles, grid, geom),  # 32 frames plus a three-frame tail
+        _hybrid(raw, angles, grid, geom, frame_chunk=16),
+        _hybrid(raw, angles, grid, geom, frame_chunk=128),
     ):
         np.testing.assert_allclose(result, expected, rtol=3e-4, atol=2e-6 * expected.max())
     # DMAS scales linearly with a common positive channel gain.

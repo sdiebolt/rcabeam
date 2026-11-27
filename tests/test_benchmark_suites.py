@@ -76,6 +76,8 @@ def test_all_routes_shared_settings_and_writes_one_report(entry, runners, tmp_pa
             "16",
             "--frame-chunk",
             "3",
+            "--dmas-frame-chunk",
+            "128",
             "--output",
             str(path),
         ]
@@ -87,7 +89,7 @@ def test_all_routes_shared_settings_and_writes_one_report(entry, runners, tmp_pa
         ("clutter_benchmark", (), filtered),
         ("two_stage_clutter", (), dict(**filtered, density=[8, 16], frame_chunk=3)),
         ("approximation_benchmark", (), dict(**filtered, family="st-sw")),
-        ("approximation_benchmark", (), dict(**filtered, family="dmas")),
+        ("approximation_benchmark", (), dict(**filtered, family="dmas", frame_chunk=128)),
     ]
     assert json.loads(path.read_text()) == report
     assert report["targets"]["complete_pipeline_ms"] == report["targets"]["reconstruction_only_ms"] == 400
@@ -118,6 +120,8 @@ def test_extended_precision_is_opt_in_and_has_separate_fixture(entry, runners):
         ["--extended-clutter"],
         ["--density", "8"],
         ["--frame-chunk", "4"],
+        ["--suite", "st-sw", "--rank-start", "3", "--dmas-frame-chunk", "128"],
+        ["--suite", "dmas", "--rank-start", "3", "--dmas-frame-chunk", "0"],
         ["--suite", "pipeline", "--rank-start", "-1"],
         ["--suite", "pipeline", "--rank-start", "3", "--rank-stop", "2"],
         ["--suite", "all", "--frames", "7", "--rank-start", "8"],
@@ -182,6 +186,8 @@ def test_real_gpu_all_suites(entry, monkeypatch, tmp_path):
             "8",
             "--frame-chunk",
             "3",
+            "--dmas-frame-chunk",
+            "4",
             "--output",
             str(path),
         ]
@@ -193,3 +199,4 @@ def test_real_gpu_all_suites(entry, monkeypatch, tmp_path):
     assert all(len(trials) == 1 for trials in reconstructed["trials"].values())
     assert len(report["suites"]["clutter"]["filtered"]) == 8
     assert report["suites"]["pipeline"]["results"]["cases"]["two_stage/8"]["trials"]
+    assert report["suites"]["dmas"]["frame_chunk"] == 4

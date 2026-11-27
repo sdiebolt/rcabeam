@@ -15,7 +15,10 @@ def stsw_maps(raw, angles, grid, geom, planes):
     return cp.asnumpy(power), cp.asnumpy(weight)
 
 
-def hybrid_dmas(raw, angles, grid, geom):
+def hybrid_dmas(raw, angles, grid, geom, *, frame_chunk=32):
+    if frame_chunk < 1:
+        raise ValueError("DMAS frame chunk must be positive")
+
     import cupy as cp
 
     from .dmas_delay import cuda_module, prepare_hybrid
@@ -25,7 +28,7 @@ def hybrid_dmas(raw, angles, grid, geom):
     frames = raw[0].shape[-1]
     reconstruct = prepare_hybrid(raw[0].shape, grid, geom, angles, 0.5, 16, cuda_module(), cubic=True)
     total = cp.zeros(tuple(map(len, grid)), cp.float64)
-    for start in range(0, frames, 32):
-        block = tuple(v[..., start : start + 32] for v in raw)
+    for start in range(0, frames, frame_chunk):
+        block = tuple(v[..., start : start + frame_chunk] for v in raw)
         total += block[0].shape[-1] * reconstruct(block)
     return cp.asnumpy((total / frames).astype(cp.float32))
